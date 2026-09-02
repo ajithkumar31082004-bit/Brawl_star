@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from 'react';
-import { createBrowserRouter, RouterProvider, Navigate } from 'react-router-dom';
+import { createBrowserRouter, Navigate } from 'react-router-dom';
 import { MainLayout, AuthLayout, GameLayout } from './components/layout/MainLayout';
 import { useAuthStore } from './store/authStore';
 
@@ -24,8 +24,10 @@ function PageLoader() {
   return (
     <div className="min-h-screen flex items-center justify-center">
       <div className="text-center">
-        <div className="w-16 h-16 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-        <div className="font-heading font-bold text-purple-400 text-sm tracking-widest">LOADING...</div>
+        <div className="w-14 h-14 border-4 border-cyan-400 border-t-transparent rounded-full animate-spin mx-auto mb-4 shadow-lg shadow-cyan-500/30" />
+        <div className="font-heading font-black text-cyan-400 text-sm tracking-widest animate-pulse">
+          LOADING BATTLEVERSE...
+        </div>
       </div>
     </div>
   );
@@ -67,6 +69,7 @@ export const router = createBrowserRouter([
       { path: 'modes', element: withSuspense(Modes) },
       { path: 'ranking', element: withSuspense(Ranking) },
       { path: 'events', element: withSuspense(Events) },
+      { path: 'lobby', element: withProtectedSuspense(Lobby) },
       { path: 'play', element: withProtectedSuspense(Lobby) },
       { path: 'shop', element: withProtectedSuspense(Shop) },
       { path: 'profile', element: withProtectedSuspense(Profile) },
@@ -78,6 +81,7 @@ export const router = createBrowserRouter([
     path: '/',
     element: <GameLayout />,
     children: [
+      { path: 'arena', element: withProtectedSuspense(Game) },
       { path: 'game', element: withProtectedSuspense(Game) },
     ],
   },
@@ -88,5 +92,9 @@ export const router = createBrowserRouter([
       { path: 'login', element: withSuspense(Login) },
       { path: 'register', element: withSuspense(Register) },
     ],
+  },
+  {
+    path: '*',
+    element: <Navigate to="/" replace />,
   },
 ]);

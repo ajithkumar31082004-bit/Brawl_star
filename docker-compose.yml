@@ -1,0 +1,78 @@
+services:
+  # 1. Frontend Web App (React + Vite SPA)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: battleverse_frontend
+    restart: always
+    ports:
+      - "80:80"
+    environment:
+      - VITE_API_URL=http://localhost:5000/api
+      - VITE_SOCKET_URL=http://localhost:5000
+    depends_on:
+      backend:
+        condition: service_started
+
+  # 2. Backend REST & Socket.IO Multiplayer Server
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: battleverse_backend
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - NODE_ENV=production
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=battleverse_user
+      - DB_PASSWORD=battleverse_secret_password
+      - DB_NAME=battleverse_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=battleverse_prod_secret_key_2026
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # 3. MySQL 8.0 Relational Database
+  mysql:
+    image: mysql:8.0
+    container_name: battleverse_mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root_battleverse_password
+      MYSQL_DATABASE: battleverse_db
+      MYSQL_USER: battleverse_user
+      MYSQL_PASSWORD: battleverse_secret_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_battleverse_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 4. Redis Cache & Session Store
+  redis:
+    image: redis:7-alpine
+    container_name: battleverse_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  mysql_data:
+  redis_data:
