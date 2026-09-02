@@ -4,6 +4,7 @@ import { ArenaScene, GameEventCallbacks } from './scenes/ArenaScene';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { useSound } from '../hooks/useSound';
+import { ntfyMatchVictory } from '../services/ntfy';
 
 export const PhaserGame: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -30,6 +31,9 @@ export const PhaserGame: React.FC = () => {
     setDidWin(won);
     setStats(matchStats);
     playSound(won ? 'victory' : 'defeat');
+    if (won) {
+      ntfyMatchVictory(25);
+    }
   }, [playSound]);
 
   useEffect(() => {

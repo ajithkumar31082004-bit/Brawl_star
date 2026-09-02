@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useSound } from '../../hooks/useSound';
 import { useAuthStore } from '../../store/authStore';
+import { ntfyHeroUnlocked } from '../../services/ntfy';
 
 export interface CrateReward {
   type: 'coins' | 'gems' | 'powerpoints' | 'hero';
@@ -60,6 +61,7 @@ export const CrateOpeningModal: React.FC<CrateOpeningModalProps> = ({
 
       if (nextReward.type === 'hero') {
         playSound('victory');
+        ntfyHeroUnlocked(nextReward.heroName || 'FROST', nextReward.heroRarity || 'Super Rare');
       } else {
         playSound('crystal');
       }
