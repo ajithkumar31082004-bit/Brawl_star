@@ -42,7 +42,7 @@ export const MainLayout: React.FC = () => {
     <div className="min-h-screen bg-[#0a0e1a] relative">
       <ParticleBg />
       <Navbar />
-      <main className="relative z-10 pt-16">
+      <main className="relative z-10 pt-20 sm:pt-24">
         <Outlet />
       </main>
       {/* Footer */}
