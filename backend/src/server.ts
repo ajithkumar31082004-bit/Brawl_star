@@ -4,6 +4,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import { notifyUserRegistration, notifyMatchCompleted } from './services/snsService.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -80,11 +81,15 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/auth/register', (req: Request, res: Response) => {
+app.post('/api/auth/register', async (req: Request, res: Response) => {
   const { username, email, password } = req.body;
   if (!username || !email || !password) {
     return res.status(400).json({ error: 'All fields are required.' });
   }
+
+  // Publish SNS notification event
+  await notifyUserRegistration(username, email);
+
   return res.status(201).json({
     message: 'User registered successfully',
     token: 'mock_jwt_battleverse_token_' + Date.now(),

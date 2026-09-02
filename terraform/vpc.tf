@@ -1,77 +1,62 @@
-# ==========================================
-# VPC & Networking Architecture
-# ==========================================
-
+# Data source for Availability Zones
 data "aws_availability_zones" "available" {
   state = "available"
 }
 
+# 1. Dedicated VPC
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
 
   tags = {
-    Name = "battleverse-vpc"
+    Name = "${local.name_prefix}-vpc"
   }
 }
 
-# Internet Gateway
+# 2. Internet Gateway for Public Subnet (EC2)
 resource "aws_internet_gateway" "gw" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "battleverse-igw"
+    Name = "${local.name_prefix}-igw"
   }
 }
 
-# Public Subnets
+# 3. Public Subnet (EC2 + Nginx)
 resource "aws_subnet" "public" {
-  count                   = length(var.public_subnet_cidrs)
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_cidrs[count.index]
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  cidr_block              = var.public_subnet_cidr
+  availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "battleverse-public-subnet-${count.index + 1}"
-    Type = "Public"
+    Name = "${local.name_prefix}-public-subnet"
   }
 }
 
-# Private Subnets
-resource "aws_subnet" "private" {
-  count             = length(var.private_subnet_cidrs)
+# 4. Private Subnets across 2 AZs (RDS requirement)
+resource "aws_subnet" "private_1" {
   vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnet_cidrs[count.index]
-  availability_zone = data.aws_availability_zones.available.names[count.index]
+  cidr_block        = var.private_subnet_cidrs[0]
+  availability_zone = data.aws_availability_zones.available.names[0]
 
   tags = {
-    Name = "battleverse-private-subnet-${count.index + 1}"
-    Type = "Private"
+    Name = "${local.name_prefix}-private-subnet-1"
   }
 }
 
-# NAT Gateway EIP
-resource "aws_eip" "nat" {
-  domain = "vpc"
+resource "aws_subnet" "private_2" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_subnet_cidrs[1]
+  availability_zone = data.aws_availability_zones.available.names[1]
 
   tags = {
-    Name = "battleverse-nat-eip"
+    Name = "${local.name_prefix}-private-subnet-2"
   }
 }
 
-# NAT Gateway
-resource "aws_nat_gateway" "nat" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id
-
-  tags = {
-    Name = "battleverse-nat-gateway"
-  }
-}
-
-# Public Route Table
+# 5. Public Route Table
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
@@ -81,33 +66,30 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name = "battleverse-public-rt"
+    Name = "${local.name_prefix}-public-rt"
   }
 }
 
-# Private Route Table
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.nat.id
-  }
-
-  tags = {
-    Name = "battleverse-private-rt"
-  }
-}
-
-# Route Table Associations
 resource "aws_route_table_association" "public" {
-  count          = length(aws_subnet.public)
-  subnet_id      = aws_subnet.public[count.index].id
+  subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
 
-resource "aws_route_table_association" "private" {
-  count          = length(aws_subnet.private)
-  subnet_id      = aws_subnet.private[count.index].id
+# 6. Private Route Table (No Internet route - strictly internal)
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${local.name_prefix}-private-rt"
+  }
+}
+
+resource "aws_route_table_association" "private_1" {
+  subnet_id      = aws_subnet.private_1.id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_route_table_association" "private_2" {
+  subnet_id      = aws_subnet.private_2.id
   route_table_id = aws_route_table.private.id
 }
