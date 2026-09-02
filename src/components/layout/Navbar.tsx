@@ -7,6 +7,8 @@ import { useAuthStore } from '../../store/authStore';
 const NAV_LINKS = [
   { label: 'HOME', path: '/' },
   { label: 'HEROES', path: '/heroes' },
+  { label: 'PASS', path: '/pass' },
+  { label: 'ROAD', path: '/trophy-road' },
   { label: 'MODES', path: '/modes' },
   { label: 'RANKING', path: '/ranking' },
   { label: 'SHOP', path: '/shop' },

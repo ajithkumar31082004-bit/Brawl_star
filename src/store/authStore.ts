@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-interface User {
+export interface User {
   id: string;
   username: string;
   email: string;
@@ -18,16 +18,19 @@ interface User {
   matches: number;
 }
 
-interface AuthStore {
+export interface AuthStore {
   user: User | null;
   token: string | null;
   isAuthenticated: boolean;
   login: (user: User, token: string) => void;
   logout: () => void;
   updateUser: (updates: Partial<User>) => void;
+  addCoins: (amount: number) => void;
+  addGems: (amount: number) => void;
+  buyItem: (itemId: string, price: number, currency: 'coins' | 'gems') => boolean;
 }
 
-const MOCK_USER: User = {
+export const MOCK_USER: User = {
   id: '1',
   username: 'AjithKumar',
   email: 'ajith@example.com',
@@ -46,7 +49,7 @@ const MOCK_USER: User = {
 
 export const useAuthStore = create<AuthStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       user: null,
       token: null,
       isAuthenticated: false,
@@ -59,6 +62,30 @@ export const useAuthStore = create<AuthStore>()(
         set((state) => ({
           user: state.user ? { ...state.user, ...updates } : null,
         })),
+
+      addCoins: (amount) =>
+        set((state) => ({
+          user: state.user ? { ...state.user, coins: state.user.coins + amount } : null,
+        })),
+
+      addGems: (amount) =>
+        set((state) => ({
+          user: state.user ? { ...state.user, gems: state.user.gems + amount } : null,
+        })),
+
+      buyItem: (_itemId, price, currency) => {
+        const user = get().user;
+        if (!user) return false;
+        if (currency === 'coins') {
+          if (user.coins < price) return false;
+          set({ user: { ...user, coins: user.coins - price } });
+          return true;
+        } else {
+          if (user.gems < price) return false;
+          set({ user: { ...user, gems: user.gems - price } });
+          return true;
+        }
+      },
     }),
     {
       name: 'battleverse-auth',
@@ -66,10 +93,6 @@ export const useAuthStore = create<AuthStore>()(
   )
 );
 
-// Helper to login with mock data for demo
 export const loginWithMock = () => {
-  const store = useAuthStore.getState();
-  store.login(MOCK_USER, 'mock-jwt-token-12345');
+  useAuthStore.getState().login(MOCK_USER, 'mock-jwt-token');
 };
-
-export const MOCK_USER_DATA = MOCK_USER;

@@ -11,7 +11,7 @@ terraform {
   backend "s3" {
     bucket         = "battleverse-terraform-state-2026"
     key            = "prod/terraform.tfstate"
-    region         = "us-east-1"
+    region         = "ap-south-1"
     encrypt        = true
     dynamodb_table = "battleverse-tf-locks"
   }

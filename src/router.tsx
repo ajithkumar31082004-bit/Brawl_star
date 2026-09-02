@@ -16,6 +16,8 @@ const Ranking = lazy(() => import('./pages/Ranking').then(m => ({ default: m.Ran
 const Friends = lazy(() => import('./pages/Friends').then(m => ({ default: m.Friends })));
 const Events = lazy(() => import('./pages/Events').then(m => ({ default: m.Events })));
 const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })));
+const BrawlPass = lazy(() => import('./pages/BrawlPass').then(m => ({ default: m.BrawlPass })));
+const TrophyRoad = lazy(() => import('./pages/TrophyRoad').then(m => ({ default: m.TrophyRoad })));
 const Login = lazy(() => import('./pages/Auth').then(m => ({ default: m.Login })));
 const Register = lazy(() => import('./pages/Auth').then(m => ({ default: m.Register })));
 
@@ -69,6 +71,9 @@ export const router = createBrowserRouter([
       { path: 'modes', element: withSuspense(Modes) },
       { path: 'ranking', element: withSuspense(Ranking) },
       { path: 'events', element: withSuspense(Events) },
+      { path: 'trophy-road', element: withProtectedSuspense(TrophyRoad) },
+      { path: 'pass', element: withProtectedSuspense(BrawlPass) },
+      { path: 'brawlpass', element: withProtectedSuspense(BrawlPass) },
       { path: 'lobby', element: withProtectedSuspense(Lobby) },
       { path: 'play', element: withProtectedSuspense(Lobby) },
       { path: 'shop', element: withProtectedSuspense(Shop) },

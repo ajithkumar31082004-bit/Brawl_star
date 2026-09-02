@@ -4,6 +4,7 @@ import { ShoppingCart, Star, Zap } from 'lucide-react';
 import { SHOP_ITEMS } from '../data/shop';
 import type { ShopItem } from '../data/shop';
 import { useAuthStore } from '../store/authStore';
+import { CrateOpeningModal } from '../components/gacha/CrateOpeningModal';
 
 const CATEGORIES = [
   { id: 'offers', label: 'OFFERS', emoji: '🔥' },
@@ -104,20 +105,40 @@ function ShopCard({ item, onBuy }: { item: ShopItem; onBuy: () => void }) {
 }
 
 export const Shop: React.FC = () => {
+  const { user, buyItem } = useAuthStore();
   const [activeCategory, setActiveCategory] = useState('offers');
-  const [notification, setNotification] = useState('');
-  const { user, updateUser } = useAuthStore();
+  const [notification, setNotification] = useState<string | null>(null);
+  const [openCrateModal, setOpenCrateModal] = useState(false);
+  const [currentCrateTitle, setCurrentCrateTitle] = useState('STAR MEGA CRATE');
 
-  const filtered = SHOP_ITEMS.filter((item) => item.category === activeCategory);
+  const filtered = SHOP_ITEMS.filter((i) => i.category === activeCategory);
 
   const handleBuy = (item: ShopItem) => {
-    if (!user) return;
-    setNotification(`✅ ${item.name} purchased!`);
-    setTimeout(() => setNotification(''), 3000);
+    if (item.category === 'daily' || item.name.toLowerCase().includes('box') || item.name.toLowerCase().includes('crate')) {
+      setCurrentCrateTitle(item.name);
+      setOpenCrateModal(true);
+      return;
+    }
+
+    const success = buyItem(item.id, item.price, item.currency);
+    if (success) {
+      setNotification(`🎉 Successfully purchased ${item.name}!`);
+      setTimeout(() => setNotification(null), 3000);
+    } else {
+      setNotification(`❌ Not enough ${item.currency}!`);
+      setTimeout(() => setNotification(null), 3000);
+    }
   };
 
   return (
     <div className="min-h-screen py-10 px-4">
+      {/* Interactive Gacha Crate Modal */}
+      <CrateOpeningModal
+        crateName={currentCrateTitle}
+        isOpen={openCrateModal}
+        onClose={() => setOpenCrateModal(false)}
+      />
+
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="flex items-start justify-between mb-8 flex-wrap gap-4">
