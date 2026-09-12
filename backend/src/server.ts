@@ -1,210 +1,237 @@
+import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
+import { createAdapter } from '@socket.io/redis-adapter';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { notifyUserRegistration, notifyMatchCompleted } from './services/snsService.js';
 
-const app = express();
+import { connectDB } from './db/postgres.js';
+import { connectRedis, redisPublisher, redisSubscriber } from './db/redis.js';
+import { loadHeroStats } from './game/HeroStats.js';
+import { Matchmaker } from './game/Matchmaker.js';
+
+import { authRouter }        from './routes/auth.js';
+import { heroesRouter }      from './routes/heroes.js';
+import { leaderboardRouter } from './routes/leaderboard.js';
+import { profileRouter }     from './routes/profile.js';
+import { matchesRouter }     from './routes/matches.js';
+import { requireAuth }       from './middleware/auth.js';
+
+const app    = express();
 const server = http.createServer(app);
-const PORT = process.env.PORT || 5000;
+const PORT   = Number(process.env.PORT) || 5000;
 
-// Security & Middlewares
-app.use(helmet());
-app.use(cors({ origin: '*', credentials: true }));
-app.use(express.json());
+// ─── Security & Middleware ────────────────────────────────────────────────────
+app.use(helmet({
+  contentSecurityPolicy: false, // handled by nginx in production
+}));
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || '*',
+  credentials: true,
+}));
+app.use(express.json({ limit: '1mb' }));
 
-// Rate Limiter
+// ─── Rate Limiting ────────────────────────────────────────────────────────────
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
+  windowMs:       15 * 60 * 1000,
+  max:            200,
   standardHeaders: true,
-  legacyHeaders: false,
+  legacyHeaders:  false,
   message: { error: 'Too many requests, please try again later.' },
 });
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,       // Stricter limit for auth endpoints
+  standardHeaders: true,
+  legacyHeaders:  false,
+  message: { error: 'Too many auth attempts, please try again later.' },
+});
+
 app.use('/api', apiLimiter);
+app.use('/api/auth', authLimiter);
 
-// In-memory mock DB fallback (active when MySQL is not connected)
-const HEROES_DATA = [
-  { id: 'blaze', name: 'BLAZE', class: 'Damage', rarity: 'Legendary', health: 5200, attack: 850, speed: 80, range: 70, emoji: '🔥', ability: 'Fire Storm' },
-  { id: 'volt', name: 'VOLT', class: 'Assassin', rarity: 'Epic', health: 3800, attack: 1100, speed: 95, range: 60, emoji: '⚡', ability: 'Lightning Dash' },
-  { id: 'titan', name: 'TITAN', class: 'Tank', rarity: 'Epic', health: 8500, attack: 650, speed: 55, range: 50, emoji: '🛡️', ability: 'Shield Wall' },
-  { id: 'frost', name: 'FROST', class: 'Controller', rarity: 'Super Rare', health: 4200, attack: 720, speed: 70, range: 80, emoji: '❄️', ability: 'Ice Burst' },
-  { id: 'rocket', name: 'ROCKET', class: 'Damage', rarity: 'Super Rare', health: 4600, attack: 950, speed: 72, range: 90, emoji: '🚀', ability: 'Rocket Barrage' },
-  { id: 'luna', name: 'LUNA', class: 'Support', rarity: 'Rare', health: 4000, attack: 580, speed: 75, range: 85, emoji: '🌙', ability: 'Healing Pulse' },
-  { id: 'buster', name: 'BUSTER', class: 'Tank', rarity: 'Rare', health: 7800, attack: 700, speed: 60, range: 45, emoji: '👊', ability: 'Ground Slam' },
-  { id: 'pico', name: 'PICO', class: 'Support', rarity: 'Rare', health: 3600, attack: 500, speed: 90, range: 75, emoji: '🤖', ability: 'Energy Boost' },
-];
-
-const LEADERBOARD_DATA = [
-  { rank: 1, username: 'ShadowX', trophies: 18540, victories: 1420, winRate: 78.5, country: 'US' },
-  { rank: 2, username: 'ProGamer', trophies: 17920, victories: 1310, winRate: 75.2, country: 'KR' },
-  { rank: 3, username: 'AjithKumar', trophies: 12540, victories: 342, winRate: 58.8, country: 'IN', isCurrentUser: true },
-  { rank: 4, username: 'DarkKnight', trophies: 15760, victories: 1120, winRate: 68.4, country: 'GB' },
-  { rank: 5, username: 'NinjaDev', trophies: 14920, victories: 980, winRate: 64.1, country: 'JP' },
-];
-
-// ================= REST API ROUTES =================
+// ─── REST Routes ─────────────────────────────────────────────────────────────
+app.use('/api/auth',        authRouter);
+app.use('/api/heroes',      heroesRouter);
+app.use('/api/leaderboard', leaderboardRouter);
+app.use('/api/profile',     requireAuth, profileRouter);
+app.use('/api/matches',     matchesRouter);
 
 // Health check
 app.get('/api/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', service: 'battleverse-api', uptime: process.uptime(), timestamp: new Date() });
-});
-
-// Authentication
-app.post('/api/auth/login', (req: Request, res: Response) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
-  }
-
-  // Return authenticated user token
-  return res.json({
-    token: 'mock_jwt_battleverse_token_' + Date.now(),
-    user: {
-      id: 'u-1',
-      username: username || 'AjithKumar',
-      email: 'ajith@battleverse.gg',
-      level: 28,
-      xp: 1620,
-      maxXp: 3100,
-      trophies: 12540,
-      coins: 15420,
-      gems: 1250,
-      avatar: '🔥',
-      rank: 'Diamond I',
-      wins: 342,
-      losses: 239,
-      matches: 581,
-    },
+  res.json({
+    status: 'ok',
+    service: 'battleverse-api',
+    uptime: Math.round(process.uptime()),
+    timestamp: new Date(),
+    version: '2.0.0',
   });
 });
 
-app.post('/api/auth/register', async (req: Request, res: Response) => {
-  const { username, email, password } = req.body;
-  if (!username || !email || !password) {
-    return res.status(400).json({ error: 'All fields are required.' });
-  }
-
-  // Publish SNS notification event
-  await notifyUserRegistration(username, email);
-
-  return res.status(201).json({
-    message: 'User registered successfully',
-    token: 'mock_jwt_battleverse_token_' + Date.now(),
-    user: { id: 'u-new', username, email, level: 1, xp: 0, maxXp: 500, trophies: 0, coins: 500, gems: 50, avatar: '🔥', rank: 'Bronze' },
-  });
-});
-
-// Heroes
-app.get('/api/heroes', (_req: Request, res: Response) => {
-  res.json({ heroes: HEROES_DATA });
-});
-
-app.get('/api/heroes/:id', (req: Request, res: Response) => {
-  const hero = HEROES_DATA.find((h) => h.id === req.params.id);
-  if (!hero) return res.status(404).json({ error: 'Hero not found' });
-  res.json({ hero });
-});
-
-// Leaderboard
-app.get('/api/leaderboard', (_req: Request, res: Response) => {
-  res.json({ leaderboard: LEADERBOARD_DATA, totalPlayers: '2.4M', season: 7 });
-});
-
-// Matches
-app.post('/api/matches', (req: Request, res: Response) => {
-  const { mode, teamWon, stats } = req.body;
-  res.status(201).json({
-    matchId: 'match_' + Date.now(),
-    mode: mode || 'crystal_clash',
-    result: teamWon ? 'VICTORY' : 'DEFEAT',
-    rewards: teamWon ? { trophies: 25, xp: 500, coins: 250 } : { trophies: -5, xp: 150, coins: 50 },
-    stats,
-  });
-});
-
-// ================= SOCKET.IO MULTIPLAYER =================
+// ─── Socket.IO ────────────────────────────────────────────────────────────────
 const io = new SocketIOServer(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: {
+    origin: process.env.CORS_ORIGIN || '*',
+    methods: ['GET', 'POST'],
+  },
+  transports: ['websocket', 'polling'],
+  pingTimeout: 20000,
+  pingInterval: 10000,
 });
 
-interface PlayerState {
-  id: string;
-  socketId: string;
-  name: string;
-  hero: string;
-  team: 'blue' | 'red';
-  x: number;
-  y: number;
-  hp: number;
-  crystals: number;
-}
+// Instantiate matchmaker
+const matchmaker = new Matchmaker(io);
 
-const rooms: Record<string, { id: string; players: PlayerState[]; blueCrystals: number; redCrystals: number }> = {};
+// ─── WebSocket Authentication Middleware ──────────────────────────────────────
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+  if (!token) {
+    return next(new Error('Authentication required'));
+  }
 
+  try {
+    import('jsonwebtoken').then((jwt) => {
+      try {
+        const payload = jwt.default.verify(
+          String(token),
+          process.env.JWT_SECRET || 'battleverse_dev_secret_CHANGE_ME'
+        ) as { userId: string; username: string; role: string };
+
+        socket.data.userId   = payload.userId;
+        socket.data.username = payload.username;
+        socket.data.role     = payload.role;
+        next();
+      } catch {
+        next(new Error('Invalid or expired token'));
+      }
+    }).catch(() => next(new Error('Auth module load failed')));
+  } catch {
+    next(new Error('Authentication error'));
+  }
+});
+
+// ─── Socket.IO Event Handlers ─────────────────────────────────────────────────
 io.on('connection', (socket) => {
-  console.log(`[Socket.IO] Client connected: ${socket.id}`);
+  const { userId, username } = socket.data as { userId: string; username: string };
+  console.log(`[Socket.IO] ${username} (${socket.id}) connected`);
 
-  // Join match room
-  socket.on('match:join', ({ roomId, playerName, heroId }: { roomId: string; playerName: string; heroId: string }) => {
-    const roomKey = roomId || 'arena_default';
-    socket.join(roomKey);
+  // ── Matchmaking ──────────────────────────────────────────────────────────────
 
-    if (!rooms[roomKey]) {
-      rooms[roomKey] = { id: roomKey, players: [], blueCrystals: 0, redCrystals: 0 };
-    }
-
-    const team = rooms[roomKey].players.length % 2 === 0 ? 'blue' : 'red';
-    const player: PlayerState = {
-      id: `p_${socket.id}`,
+  socket.on('matchmaking:enter', ({
+    heroSlug,
+    gameMode = 'gem_grab',
+    trophies = 0,
+    region = 'global',
+  }: {
+    heroSlug: string;
+    gameMode?: string;
+    trophies?: number;
+    region?: string;
+  }) => {
+    matchmaker.enqueue({
       socketId: socket.id,
-      name: playerName || 'Player',
-      hero: heroId || 'blaze',
-      team,
-      x: team === 'blue' ? 200 : 760,
-      y: 320,
-      hp: 3200,
-      crystals: 0,
-    };
-
-    rooms[roomKey].players.push(player);
-    io.to(roomKey).emit('match:players_update', { players: rooms[roomKey].players });
-  });
-
-  // Player position sync
-  socket.on('player:move', ({ roomId, x, y }: { roomId: string; x: number; y: number }) => {
-    socket.to(roomId).emit('player:moved', { socketId: socket.id, x, y });
-  });
-
-  // Player shooting sync
-  socket.on('player:attack', ({ roomId, targetX, targetY }: { roomId: string; targetX: number; targetY: number }) => {
-    socket.to(roomId).emit('player:attacked', { socketId: socket.id, targetX, targetY });
-  });
-
-  // Crystal pickup sync
-  socket.on('crystal:collect', ({ roomId, team }: { roomId: string; team: 'blue' | 'red' }) => {
-    if (rooms[roomId]) {
-      if (team === 'blue') rooms[roomId].blueCrystals += 1;
-      else rooms[roomId].redCrystals += 1;
-
-      io.to(roomId).emit('crystal:score_update', {
-        blue: rooms[roomId].blueCrystals,
-        red: rooms[roomId].redCrystals,
-      });
-    }
-  });
-
-  socket.on('disconnect', () => {
-    console.log(`[Socket.IO] Client disconnected: ${socket.id}`);
-    Object.keys(rooms).forEach((rKey) => {
-      rooms[rKey].players = rooms[rKey].players.filter((p) => p.socketId !== socket.id);
-      io.to(rKey).emit('match:players_update', { players: rooms[rKey].players });
+      userId,
+      username,
+      heroSlug: heroSlug || 'blaze',
+      trophies: Number(trophies),
+      region,
+      gameMode,
     });
   });
+
+  socket.on('matchmaking:cancel', () => {
+    matchmaker.dequeue(socket.id);
+    socket.emit('matchmaking:cancelled');
+  });
+
+  // ── Game Input ───────────────────────────────────────────────────────────────
+
+  /**
+   * Client sends direction + aim at fixed rate (20 TPS).
+   * Server validates movement speed, cooldowns, then simulates bullet.
+   */
+  socket.on('player:input', (input: {
+    dx: number;
+    dy: number;
+    aimX: number;
+    aimY: number;
+    firing: boolean;
+    usingSuper: boolean;
+    sequenceNumber: number;
+  }) => {
+    matchmaker.receiveInput(socket.id, {
+      dx: Number(input.dx) || 0,
+      dy: Number(input.dy) || 0,
+      aimX: Number(input.aimX) || 0,
+      aimY: Number(input.aimY) || 0,
+      firing: Boolean(input.firing),
+      usingSuper: Boolean(input.usingSuper),
+      sequenceNumber: Number(input.sequenceNumber) || 0,
+    });
+  });
+
+  // ── Match persistence ────────────────────────────────────────────────────────
+
+  matchmaker.on('match:complete', async (data) => {
+    // Forward to matches API route for DB persistence
+    try {
+      const response = await fetch(`http://localhost:${PORT}/api/matches/complete`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-secret': process.env.INTERNAL_SECRET || 'internal_secret_CHANGE_ME',
+        },
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) {
+        console.error('[Server] Match persist failed:', await response.text());
+      }
+    } catch (err) {
+      console.error('[Server] Match persist error:', err);
+    }
+  });
+
+  // ── Disconnect ───────────────────────────────────────────────────────────────
+
+  socket.on('disconnect', (reason) => {
+    console.log(`[Socket.IO] ${username} (${socket.id}) disconnected — ${reason}`);
+    matchmaker.handleDisconnect(socket.id);
+  });
 });
 
-server.listen(PORT, () => {
-  console.log(`🚀 [BATTLEVERSE] Backend server active on port ${PORT}`);
-});
+// ─── Server Startup ───────────────────────────────────────────────────────────
+async function bootstrap(): Promise<void> {
+  try {
+    // 1. Connect to PostgreSQL
+    await connectDB();
+
+    // 2. Connect to Redis
+    await connectRedis();
+
+    // 3. Attach Redis adapter to Socket.IO (enables multi-server pub/sub)
+    io.adapter(createAdapter(redisPublisher, redisSubscriber));
+    console.log('[Socket.IO] Redis adapter attached');
+
+    // 4. Load hero stats into memory
+    await loadHeroStats();
+
+    // 5. Start matchmaker
+    matchmaker.start();
+
+    // 6. Start HTTP server
+    server.listen(PORT, () => {
+      console.log(`\n🚀 [BATTLEVERSE] Server v2.0 active on port ${PORT}`);
+      console.log(`   API:       http://localhost:${PORT}/api`);
+      console.log(`   Health:    http://localhost:${PORT}/api/health`);
+      console.log(`   WebSocket: ws://localhost:${PORT}\n`);
+    });
+  } catch (err) {
+    console.error('❌ [BATTLEVERSE] Failed to start server:', err);
+    process.exit(1);
+  }
+}
+
+bootstrap();

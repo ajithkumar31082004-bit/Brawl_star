@@ -9,6 +9,7 @@ export interface User {
   xp: number;
   maxXp: number;
   trophies: number;
+  highestTrophies?: number;
   coins: number;
   gems: number;
   avatar: string;
@@ -16,53 +17,53 @@ export interface User {
   wins: number;
   losses: number;
   matches: number;
+  role?: string;
 }
 
 export interface AuthStore {
   user: User | null;
-  token: string | null;
+  accessToken: string | null;
+  refreshToken: string | null;
   isAuthenticated: boolean;
-  login: (user: User, token: string) => void;
+
+  login:  (user: User, accessToken: string, refreshToken: string) => void;
   logout: () => void;
   updateUser: (updates: Partial<User>) => void;
+
+  // Called by the API interceptor when it gets a new token pair
+  setTokens: (accessToken: string, refreshToken: string) => void;
+
+  // Legacy stubs — economy is now server-authoritative.
+  // These update local display only; server is the source of truth.
   addCoins: (amount: number) => void;
-  addGems: (amount: number) => void;
-  buyItem: (itemId: string, price: number, currency: 'coins' | 'gems') => boolean;
+  addGems:  (amount: number) => void;
+  buyItem:  (itemId: string, price: number, currency: 'coins' | 'gems') => boolean;
 }
 
-export const MOCK_USER: User = {
-  id: '1',
-  username: 'AjithKumar',
-  email: 'ajith@example.com',
-  level: 28,
-  xp: 1620,
-  maxXp: 3100,
-  trophies: 12540,
-  coins: 15420,
-  gems: 1250,
-  avatar: '🔥',
-  rank: 'Diamond I',
-  wins: 342,
-  losses: 239,
-  matches: 581,
-};
 
 export const useAuthStore = create<AuthStore>()(
   persist(
-    (set, get) => ({
-      user: null,
-      token: null,
+    (set) => ({
+      user:          null,
+      accessToken:   null,
+      refreshToken:  null,
       isAuthenticated: false,
 
-      login: (user, token) => set({ user, token, isAuthenticated: true }),
+      login: (user, accessToken, refreshToken) =>
+        set({ user, accessToken, refreshToken, isAuthenticated: true }),
 
-      logout: () => set({ user: null, token: null, isAuthenticated: false }),
+      logout: () =>
+        set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false }),
 
       updateUser: (updates) =>
         set((state) => ({
           user: state.user ? { ...state.user, ...updates } : null,
         })),
 
+      setTokens: (accessToken, refreshToken) =>
+        set({ accessToken, refreshToken }),
+
+      // Local-display-only stubs — server is source of truth for economy
       addCoins: (amount) =>
         set((state) => ({
           user: state.user ? { ...state.user, coins: state.user.coins + amount } : null,
@@ -74,25 +75,35 @@ export const useAuthStore = create<AuthStore>()(
         })),
 
       buyItem: (_itemId, price, currency) => {
-        const user = get().user;
+        const state = useAuthStore.getState();
+        const user = state.user;
         if (!user) return false;
         if (currency === 'coins') {
           if (user.coins < price) return false;
-          set({ user: { ...user, coins: user.coins - price } });
+          state.updateUser({ coins: user.coins - price });
           return true;
         } else {
           if (user.gems < price) return false;
-          set({ user: { ...user, gems: user.gems - price } });
+          state.updateUser({ gems: user.gems - price });
           return true;
         }
       },
     }),
     {
-      name: 'battleverse-auth',
+      name: 'battleverse-auth-v2',
+      partialize: (state) => ({
+        user:            state.user,
+        accessToken:     state.accessToken,
+        refreshToken:    state.refreshToken,
+        isAuthenticated: !!state.accessToken,
+      }),
     }
   )
 );
 
+// ─── Backward-compat export (Auth.tsx still imports this) ────────────────────
+// Will be removed once Auth.tsx is fully migrated to real API calls
 export const loginWithMock = () => {
-  useAuthStore.getState().login(MOCK_USER, 'mock-jwt-token');
+  console.warn('[Auth] loginWithMock() called — this is a stub. Connect to real API.');
 };
+

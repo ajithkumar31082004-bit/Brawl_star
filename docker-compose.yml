@@ -1,21 +1,18 @@
 services:
-  # 1. Frontend Web App (React + Vite SPA)
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: battleverse_frontend
+  # ─── 1. Nginx Reverse Proxy ─────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: battleverse_nginx
     restart: always
     ports:
       - "80:80"
-    environment:
-      - VITE_API_URL=http://localhost:5000/api
-      - VITE_SOCKET_URL=http://localhost:5000
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./dist:/usr/share/nginx/html:ro
     depends_on:
-      backend:
-        condition: service_started
+      - backend
 
-  # 2. Backend REST & Socket.IO Multiplayer Server
+  # ─── 2. Backend REST & Socket.IO Server ─────────────────────────────────────
   backend:
     build:
       context: ./backend
@@ -27,52 +24,92 @@ services:
     environment:
       - PORT=5000
       - NODE_ENV=production
-      - DB_HOST=mysql
-      - DB_PORT=3306
-      - DB_USER=battleverse_user
-      - DB_PASSWORD=battleverse_secret_password
-      - DB_NAME=battleverse_db
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - JWT_SECRET=battleverse_prod_secret_key_2026
+      - DATABASE_URL=postgresql://battleverse_user:battleverse_secret_password@postgres:5432/battleverse_db
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=battleverse_prod_secret_key_2026_CHANGE_ME
+      - JWT_REFRESH_SECRET=battleverse_prod_refresh_secret_2026_CHANGE_ME
+      - INTERNAL_SECRET=battleverse_internal_secret_2026_CHANGE_ME
+      - CORS_ORIGIN=http://localhost
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_started
 
-  # 3. MySQL 8.0 Relational Database
-  mysql:
-    image: mysql:8.0
-    container_name: battleverse_mysql
+  # ─── 3. PostgreSQL 16 Database ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: battleverse_postgres
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: root_battleverse_password
-      MYSQL_DATABASE: battleverse_db
-      MYSQL_USER: battleverse_user
-      MYSQL_PASSWORD: battleverse_secret_password
+      POSTGRES_DB:       battleverse_db
+      POSTGRES_USER:     battleverse_user
+      POSTGRES_PASSWORD: battleverse_secret_password
     ports:
-      - "3306:3306"
+      - "5432:5432"
     volumes:
-      - mysql_data:/var/lib/mysql
-      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      - ./database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/db/migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/seed.postgres.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_battleverse_password"]
+      test: ["CMD-SHELL", "pg_isready -U battleverse_user -d battleverse_db"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # 4. Redis Cache & Session Store
+  # ─── 4. Redis 7 Cache & Session Store ───────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: battleverse_redis
     restart: always
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
 
+  # ─── 5. Prometheus Metrics ───────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: battleverse_prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+
+  # ─── 6. Grafana Dashboards ───────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: battleverse_grafana
+    restart: always
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=battleverse_grafana_2026
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+  # ─── 7. Loki Log Aggregation ────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:latest
+    container_name: battleverse_loki
+    restart: always
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+
 volumes:
-  mysql_data:
+  postgres_data:
   redis_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:

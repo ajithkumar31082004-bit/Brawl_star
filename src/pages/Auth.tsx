@@ -2,8 +2,9 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Eye, EyeOff, Lock, Mail, User, Zap } from 'lucide-react';
-import { useAuthStore, loginWithMock } from '../store/authStore';
-import { supabaseSignIn, supabaseSignUp } from '../services/supabase';
+import { useAuthStore } from '../store/authStore';
+import { authAPI } from '../services/api';
+
 
 function InputField({ label, type, value, onChange, icon, placeholder }: {
   label: string; type: string; value: string; onChange: (v: string) => void;
@@ -44,6 +45,7 @@ export const Login: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  const { login } = useAuthStore();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -52,25 +54,28 @@ export const Login: React.FC = () => {
     setError('');
 
     try {
-      // Attempt Supabase sign in
-      await supabaseSignIn(email, password);
-      loginWithMock();
-      setLoading(false);
+      const { data } = await authAPI.login({ email, password });
+      login(data.user, data.accessToken, data.refreshToken);
       navigate('/profile');
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : 'Invalid credentials';
-      console.warn('[Supabase Login fallback]', errMsg);
-      // Fallback to local session
-      loginWithMock();
+      const errMsg = err instanceof Error ? err.message : 'Invalid email or password';
+      setError(errMsg);
+    } finally {
       setLoading(false);
-      navigate('/profile');
     }
   };
 
-  const handleDemoLogin = () => {
-    loginWithMock();
-    navigate('/profile');
+  const handleDemoLogin = async () => {
+    // Demo account for easy testing
+    try {
+      const { data } = await authAPI.login({ email: 'demo@battleverse.gg', password: 'Demo@12345' });
+      login(data.user, data.accessToken, data.refreshToken);
+      navigate('/profile');
+    } catch {
+      setError('Demo account not available. Please register to play.');
+    }
   };
+
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-16">
@@ -165,27 +170,28 @@ export const Register: React.FC = () => {
   const [error, setError] = useState('');
   const navigate = useNavigate();
 
+  const { login } = useAuthStore();
+
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username || !email || !password || !confirm) { setError('Please fill in all fields.'); return; }
     if (password !== confirm) { setError('Passwords do not match.'); return; }
-    if (password.length < 6) { setError('Password must be at least 6 characters.'); return; }
+    if (password.length < 8) { setError('Password must be at least 8 characters.'); return; }
     setLoading(true);
     setError('');
 
     try {
-      await supabaseSignUp(email, password, username);
-      loginWithMock();
-      setLoading(false);
+      const { data } = await authAPI.register({ username, email, password });
+      login(data.user, data.accessToken, data.refreshToken);
       navigate('/profile');
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : 'Registration error';
-      console.warn('[Supabase Register fallback]', errMsg);
-      loginWithMock();
+      const errMsg = err instanceof Error ? err.message : 'Registration failed. Please try again.';
+      setError(errMsg);
+    } finally {
       setLoading(false);
-      navigate('/profile');
     }
   };
+
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-16">
