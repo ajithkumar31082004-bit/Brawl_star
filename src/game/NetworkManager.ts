@@ -72,7 +72,7 @@ export interface NetworkCallbacks {
   onGameStart:     (data: { mapName: string }) => void;
   onGameState:     (snapshot: GameSnapshot) => void;
   onPlayerDamaged: (data: { targetId: string; damage: number; remainingHp: number }) => void;
-  onPlayerDied:    (data: { victimId: string; killerId: string; respawnInMs: number }) => void;
+  onPlayerDied:    (data: { victimId: string; victimName?: string; killerId: string; killerName?: string; respawnInMs: number }) => void;
   onPlayerRespawned:(data: { playerId: string; x: number; y: number }) => void;
   onGameOver:      (data: object) => void;
   onDisconnect:    (reason: string) => void;

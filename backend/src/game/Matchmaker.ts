@@ -29,7 +29,10 @@ const PLAYERS_PER_MATCH = 6;  // 3v3
 const BASE_TROPHY_RANGE  = 300;
 const RANGE_EXPAND_STEP  = 100;
 const RANGE_EXPAND_EVERY = 10_000; // expand range every 10s
-const TICK_INTERVAL_MS   = 2_000;  // check queue every 2s
+const TICK_INTERVAL_MS   = 1_000;  // check queue every 1s
+const BOT_WAIT_THRESHOLD_MS = 3_000; // after 3s, backfill with bots so solo player can play immediately
+const BOT_HEROES = ['blaze', 'volt', 'titan', 'frost', 'rocket', 'luna', 'buster', 'pico'];
+const BOT_NAMES = ['VortexBot', 'NovaStrike', 'MechaFury', 'CyberGhost', 'PixelPhantom', 'ThunderBot'];
 
 function randomId(): string {
   return 'ROOM-' + Math.random().toString(36).slice(2, 7).toUpperCase();
@@ -123,6 +126,17 @@ export class Matchmaker extends EventEmitter {
 
     for (const [mode, entries] of byMode.entries()) {
       if (entries.length < PLAYERS_PER_MATCH) {
+        // If someone has waited long enough, fill the lobby with bots
+        const eligibleForBotMatch = entries.filter(e => e.waitMs >= BOT_WAIT_THRESHOLD_MS);
+        if (eligibleForBotMatch.length > 0) {
+          const humans = entries.slice(0, Math.min(entries.length, PLAYERS_PER_MATCH));
+          for (const h of humans) {
+            this.queue.delete(h.socketId);
+          }
+          this.createMatchWithBots(humans, mode);
+          continue;
+        }
+
         // Not enough players — send queue update
         for (const e of entries) {
           this.io.to(e.socketId).emit('matchmaking:searching', {
@@ -200,6 +214,97 @@ export class Matchmaker extends EventEmitter {
     setTimeout(() => room.startCountdown(), 3000);
 
     // Wire room events
+    room.on('match:complete', (data) => {
+      this.emit('match:complete', data);
+    });
+
+    room.on('room:close', (id: string) => {
+      this.rooms.delete(id);
+      console.log(`[Matchmaker] Room ${id} closed`);
+    });
+  }
+
+  // ─── Create match with bots ──────────────────────────────────────────────────
+
+  private createMatchWithBots(humans: QueueEntry[], gameMode: string): void {
+    const roomId = randomId();
+    const room = new GameRoom(roomId, this.io, gameMode);
+    this.rooms.set(roomId, room);
+
+    const blueTeam: Array<{ socketId: string; userId: string; username: string; heroSlug: string; trophies: number; isBot: boolean }> = [];
+    const redTeam: Array<{ socketId: string; userId: string; username: string; heroSlug: string; trophies: number; isBot: boolean }> = [];
+
+    // Distribute humans
+    humans.forEach((h, idx) => {
+      const target = idx % 2 === 0 ? blueTeam : redTeam;
+      target.push({
+        socketId: h.socketId,
+        userId: h.userId,
+        username: h.username,
+        heroSlug: h.heroSlug,
+        trophies: h.trophies,
+        isBot: false,
+      });
+    });
+
+    let botIdx = 0;
+    while (blueTeam.length < 3) {
+      const hero = BOT_HEROES[Math.floor(Math.random() * BOT_HEROES.length)];
+      const name = BOT_NAMES[botIdx % BOT_NAMES.length];
+      botIdx++;
+      blueTeam.push({
+        socketId: `bot_${roomId}_blue_${blueTeam.length}`,
+        userId: `bot_user_${name.toLowerCase()}`,
+        username: `[BOT] ${name}`,
+        heroSlug: hero,
+        trophies: 450 + Math.floor(Math.random() * 200),
+        isBot: true,
+      });
+    }
+
+    while (redTeam.length < 3) {
+      const hero = BOT_HEROES[Math.floor(Math.random() * BOT_HEROES.length)];
+      const name = BOT_NAMES[botIdx % BOT_NAMES.length];
+      botIdx++;
+      redTeam.push({
+        socketId: `bot_${roomId}_red_${redTeam.length}`,
+        userId: `bot_user_${name.toLowerCase()}`,
+        username: `[BOT] ${name}`,
+        heroSlug: hero,
+        trophies: 450 + Math.floor(Math.random() * 200),
+        isBot: true,
+      });
+    }
+
+    for (const p of blueTeam) {
+      room.addPlayer(p.socketId, p.userId, p.username, p.heroSlug, 'blue', p.isBot);
+      if (!p.isBot) {
+        this.io.sockets.sockets.get(p.socketId)?.join(roomId);
+      }
+    }
+    for (const p of redTeam) {
+      room.addPlayer(p.socketId, p.userId, p.username, p.heroSlug, 'red', p.isBot);
+      if (!p.isBot) {
+        this.io.sockets.sockets.get(p.socketId)?.join(roomId);
+      }
+    }
+
+    this.io.to(roomId).emit('match:found', {
+      roomId,
+      gameMode,
+      mapName: 'Crystal Cavern',
+      blueTeam: blueTeam.map(e => ({ username: e.username, heroSlug: e.heroSlug, trophies: e.trophies })),
+      redTeam:  redTeam.map(e => ({ username: e.username, heroSlug: e.heroSlug, trophies: e.trophies })),
+    });
+
+    console.log(
+      `[Matchmaker] ✅ Bot match created: ${roomId}\n` +
+      `  Blue: ${blueTeam.map(e => e.username).join(', ')}\n` +
+      `  Red:  ${redTeam.map(e => e.username).join(', ')}`
+    );
+
+    setTimeout(() => room.startCountdown(), 2500);
+
     room.on('match:complete', (data) => {
       this.emit('match:complete', data);
     });

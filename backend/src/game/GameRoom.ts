@@ -51,6 +51,7 @@ export interface ServerPlayer {
   heroSlug: string;
   heroConfig: HeroConfig;
   team: 'blue' | 'red';
+  isBot?: boolean;
 
   // Position
   x: number;
@@ -144,7 +145,7 @@ export class GameRoom extends EventEmitter {
 
   // ─── Player management ──────────────────────────────────────────────────────
 
-  addPlayer(socketId: string, userId: string, username: string, heroSlug: string, team: 'blue' | 'red'): void {
+  addPlayer(socketId: string, userId: string, username: string, heroSlug: string, team: 'blue' | 'red', isBot = false): void {
     let heroConfig: HeroConfig;
     try {
       heroConfig = getHeroConfig(heroSlug);
@@ -156,7 +157,7 @@ export class GameRoom extends EventEmitter {
     const spawnY = 300 + Math.random() * 400;
 
     const player: ServerPlayer = {
-      socketId, userId, username, heroSlug, heroConfig, team,
+      socketId, userId, username, heroSlug, heroConfig, team, isBot,
       x: spawnX, y: spawnY,
       hp: heroConfig.health, maxHp: heroConfig.health,
       ammo: heroConfig.ammoCount,
@@ -263,6 +264,7 @@ export class GameRoom extends EventEmitter {
     const dt = (now - this.lastTickAt) / 1000; // seconds since last tick
     this.lastTickAt = now;
 
+    this.updateBotAI(dt, now);
     this.processInputs(dt, now);
     this.updateBullets(dt, now);
     this.checkCrystalPickups(now);
@@ -270,6 +272,81 @@ export class GameRoom extends EventEmitter {
     this.rechargeAmmo(now);
     this.checkWinCondition(now);
     this.broadcastState(now);
+  }
+
+  // ─── Bot AI ────────────────────────────────────────────────────────────────
+  private updateBotAI(_dt: number, now: number): void {
+    for (const player of this.players.values()) {
+      if (!player.isBot || player.isDead) continue;
+
+      const enemies = [...this.players.values()].filter(p => p.team !== player.team && !p.isDead);
+      const crystals = this.crystals.filter(c => c.alive);
+
+      let targetX = MAP_WIDTH / 2;
+      let targetY = MAP_HEIGHT / 2;
+      let shouldFire = false;
+      let aimX = targetX;
+      let aimY = targetY;
+
+      let closestEnemy: ServerPlayer | null = null;
+      let closestDist = Infinity;
+      for (const e of enemies) {
+        const d = distance(player.x, player.y, e.x, e.y);
+        if (d < closestDist) {
+          closestDist = d;
+          closestEnemy = e;
+        }
+      }
+
+      if (closestEnemy && closestDist <= player.heroConfig.attackRange + 120) {
+        aimX = closestEnemy.x + (Math.random() * 20 - 10);
+        aimY = closestEnemy.y + (Math.random() * 20 - 10);
+        shouldFire = true;
+      }
+
+      if (crystals.length > 0 && player.crystalsHeld < 6) {
+        let nearestCrystal = crystals[0];
+        let minDist = distance(player.x, player.y, crystals[0].x, crystals[0].y);
+        for (const c of crystals) {
+          const d = distance(player.x, player.y, c.x, c.y);
+          if (d < minDist) {
+            minDist = d;
+            nearestCrystal = c;
+          }
+        }
+        targetX = nearestCrystal.x;
+        targetY = nearestCrystal.y;
+      } else if (closestEnemy) {
+        if (player.hp < player.maxHp * 0.3) {
+          targetX = player.team === 'blue' ? 120 : 1280;
+          targetY = player.y;
+        } else {
+          const optimalDist = player.heroConfig.attackRange * 0.7;
+          if (closestDist > optimalDist) {
+            targetX = closestEnemy.x;
+            targetY = closestEnemy.y;
+          } else {
+            const angle = Math.atan2(player.y - closestEnemy.y, player.x - closestEnemy.x) + 0.4;
+            targetX = closestEnemy.x + Math.cos(angle) * optimalDist;
+            targetY = closestEnemy.y + Math.sin(angle) * optimalDist;
+          }
+        }
+      }
+
+      const moveDx = targetX - player.x;
+      const moveDy = targetY - player.y;
+      const moveLen = Math.sqrt(moveDx * moveDx + moveDy * moveDy) || 1;
+
+      player.pendingInput = {
+        dx: moveDx / moveLen,
+        dy: moveDy / moveLen,
+        aimX,
+        aimY,
+        firing: shouldFire && player.ammo > 0,
+        usingSuper: player.superCharge >= 100,
+        sequenceNumber: player.lastProcessedSequence + 1,
+      };
+    }
   }
 
   // ─── Input processing with anti-cheat ──────────────────────────────────────

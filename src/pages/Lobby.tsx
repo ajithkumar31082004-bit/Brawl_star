@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Play, RefreshCw, Users, Swords, Trophy, ArrowLeft, Check } from 'lucide-react';
+import { Play, RefreshCw, Swords, ArrowLeft, Check, X } from 'lucide-react';
 import { HEROES } from '../data/heroes';
 import { useAuthStore } from '../store/authStore';
+import { networkManager } from '../game/NetworkManager';
 
 const RARITY_COLORS: Record<string, string> = {
   Legendary: '#F59E0B', Epic: '#A855F7', 'Super Rare': '#3B82F6', Rare: '#10B981',
@@ -13,37 +14,81 @@ const HERO_ICONS: Record<string, string> = {
   blaze: '🔥', volt: '⚡', titan: '🛡️', frost: '❄️', rocket: '🚀', luna: '🌙', buster: '👊', pico: '🤖',
 };
 
-const TEAM_BLUE = ['You', 'StarBlast', 'CosmicAce'];
-const TEAM_RED = ['ShadowX', 'ProGamer', 'DarkKnight'];
-const TEAM_HEROES = ['🔥', '🌙', '🛡️'];
-const OPP_HEROES = ['⚡', '🚀', '❄️'];
+const DEFAULT_BLUE = ['You', 'StarBlast', 'CosmicAce'];
+const DEFAULT_RED = ['ShadowX', 'ProGamer', 'DarkKnight'];
+const DEFAULT_BLUE_HEROES = ['🔥', '🌙', '🛡️'];
+const DEFAULT_RED_HEROES = ['⚡', '🚀', '❄️'];
 
 type LobbyState = 'idle' | 'ready' | 'searching' | 'found';
 
+interface MatchedPlayer {
+  username: string;
+  heroSlug: string;
+  trophies: number;
+}
+
 export const Lobby: React.FC = () => {
   const navigate = useNavigate();
-  const { user } = useAuthStore();
+  const { user, accessToken } = useAuthStore();
   const [selectedHero, setSelectedHero] = useState(HEROES[0]);
   const [lobbyState, setLobbyState] = useState<LobbyState>('idle');
   const [searchTime, setSearchTime] = useState(0);
   const [showHeroSelect, setShowHeroSelect] = useState(false);
   const [selectedMode, setSelectedMode] = useState('Crystal Clash');
+  const [countdown, setCountdown] = useState<number | null>(null);
+
+  const [matchedBlueTeam, setMatchedBlueTeam] = useState<MatchedPlayer[]>([]);
+  const [matchedRedTeam, setMatchedRedTeam] = useState<MatchedPlayer[]>([]);
+  const [roomId, setRoomId] = useState<string>('');
 
   useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-    if (lobbyState === 'searching') {
-      interval = setInterval(() => {
-        setSearchTime(t => {
-          if (t >= 4) {
-            setLobbyState('found');
-            return 0;
-          }
-          return t + 1;
-        });
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [lobbyState]);
+    if (lobbyState !== 'searching') return;
+
+    const timer = setInterval(() => {
+      setSearchTime(t => t + 1);
+    }, 1000);
+
+    // Register NetworkManager callbacks
+    networkManager.setCallbacks({
+      onMatchFound: (data: { roomId: string; blueTeam: object[]; redTeam: object[] }) => {
+        const blue = data.blueTeam as MatchedPlayer[];
+        const red = data.redTeam as MatchedPlayer[];
+        setMatchedBlueTeam(blue);
+        setMatchedRedTeam(red);
+        setRoomId(data.roomId);
+        setLobbyState('found');
+        setCountdown(3);
+
+        const cdInterval = setInterval(() => {
+          setCountdown(prev => {
+            if (prev === null || prev <= 1) {
+              clearInterval(cdInterval);
+              navigate(`/game?room=${data.roomId}&hero=${selectedHero.id}`);
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+      },
+    });
+
+    const enterQueue = async () => {
+      if (!networkManager.connected) {
+        try {
+          await networkManager.connect(accessToken || 'guest-token');
+        } catch (e) {
+          console.warn('[Lobby] Socket connect error:', e);
+        }
+      }
+      networkManager.enterMatchmaking(selectedHero.id, 'crystal_clash', user?.trophies || 0);
+    };
+
+    enterQueue();
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [lobbyState, navigate, selectedHero.id, accessToken, user?.trophies]);
 
   const handleReady = () => {
     if (lobbyState === 'idle') {
@@ -51,6 +96,14 @@ export const Lobby: React.FC = () => {
     } else if (lobbyState === 'ready') {
       setLobbyState('searching');
     }
+  };
+
+  const handleCancelSearch = () => {
+    networkManager.cancelMatchmaking();
+    setLobbyState('idle');
+    setSearchTime(0);
+    setMatchedBlueTeam([]);
+    setMatchedRedTeam([]);
   };
 
   return (
@@ -95,20 +148,33 @@ export const Lobby: React.FC = () => {
               <h3 className="font-heading font-bold text-blue-400 tracking-wider">BLUE TEAM</h3>
             </div>
             <div className="space-y-3">
-              {TEAM_BLUE.map((name, i) => (
-                <div key={name} className={`flex items-center gap-3 p-3 rounded-xl ${i === 0 ? 'bg-blue-500/10 border border-blue-500/30' : 'bg-white/5'}`}>
-                  <div className="text-2xl">{TEAM_HEROES[i]}</div>
-                  <div className="flex-1">
-                    <div className="font-heading font-bold text-white text-sm">{name}</div>
-                    <div className="text-slate-500 text-xs">
-                      {i === 0 ? (user?.username || 'Player') : `LV ${20 + i * 4}`}
+              {matchedBlueTeam.length > 0 ? (
+                matchedBlueTeam.map((player, i) => (
+                  <div key={player.username + i} className={`flex items-center gap-3 p-3 rounded-xl ${i === 0 ? 'bg-blue-500/10 border border-blue-500/30' : 'bg-white/5'}`}>
+                    <div className="text-2xl">{HERO_ICONS[player.heroSlug] || '⚔️'}</div>
+                    <div className="flex-1">
+                      <div className="font-heading font-bold text-white text-sm">{player.username}</div>
+                      <div className="text-slate-500 text-xs">{player.trophies} 🏆</div>
                     </div>
-                  </div>
-                  {lobbyState !== 'idle' && (
                     <Check className="w-4 h-4 text-green-400" />
-                  )}
-                </div>
-              ))}
+                  </div>
+                ))
+              ) : (
+                DEFAULT_BLUE.map((name, i) => (
+                  <div key={name} className={`flex items-center gap-3 p-3 rounded-xl ${i === 0 ? 'bg-blue-500/10 border border-blue-500/30' : 'bg-white/5'}`}>
+                    <div className="text-2xl">{DEFAULT_BLUE_HEROES[i]}</div>
+                    <div className="flex-1">
+                      <div className="font-heading font-bold text-white text-sm">{name}</div>
+                      <div className="text-slate-500 text-xs">
+                        {i === 0 ? (user?.username || 'Player') : `LV ${20 + i * 4}`}
+                      </div>
+                    </div>
+                    {lobbyState !== 'idle' && (
+                      <Check className="w-4 h-4 text-green-400" />
+                    )}
+                  </div>
+                ))
+              )}
             </div>
           </motion.div>
 
@@ -146,7 +212,8 @@ export const Lobby: React.FC = () => {
             {/* Action buttons */}
             <button
               onClick={() => setShowHeroSelect(true)}
-              className="glass py-3 rounded-xl font-heading font-bold text-sm text-slate-300 hover:text-white border border-white/10 hover:border-white/30 transition-all cursor-pointer flex items-center justify-center gap-2"
+              disabled={lobbyState === 'searching' || lobbyState === 'found'}
+              className="glass py-3 rounded-xl font-heading font-bold text-sm text-slate-300 hover:text-white border border-white/10 hover:border-white/30 transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <RefreshCw className="w-4 h-4" />
               CHANGE HERO
@@ -155,7 +222,7 @@ export const Lobby: React.FC = () => {
             <motion.button
               whileHover={{ scale: lobbyState === 'found' ? 1 : 1.04 }}
               whileTap={{ scale: 0.97 }}
-              onClick={lobbyState === 'found' ? () => navigate('/game') : handleReady}
+              onClick={lobbyState === 'found' ? () => navigate(`/game?room=${roomId}&hero=${selectedHero.id}`) : handleReady}
               className={`py-4 rounded-xl font-heading font-black text-lg cursor-pointer transition-all shadow-lg flex items-center justify-center gap-3 ${
                 lobbyState === 'found'
                   ? 'bg-gradient-to-r from-green-500 to-emerald-500 text-black shadow-green-500/40'
@@ -174,8 +241,22 @@ export const Lobby: React.FC = () => {
                   SEARCHING... {searchTime}s
                 </>
               )}
-              {lobbyState === 'found' && <><Play className="w-5 h-5 fill-current" /> START GAME!</>}
+              {lobbyState === 'found' && (
+                <>
+                  <Play className="w-5 h-5 fill-current" />
+                  STARTING {countdown !== null ? `(${countdown}s)` : ''}!
+                </>
+              )}
             </motion.button>
+
+            {lobbyState === 'searching' && (
+              <button
+                onClick={handleCancelSearch}
+                className="glass py-2.5 rounded-xl text-xs font-heading font-bold text-red-400 hover:text-red-300 border border-red-500/30 cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <X className="w-4 h-4" /> CANCEL SEARCH
+              </button>
+            )}
 
             {/* Searching animation */}
             <AnimatePresence>
@@ -186,7 +267,7 @@ export const Lobby: React.FC = () => {
                   exit={{ opacity: 0 }}
                   className="glass rounded-xl p-3 border border-purple-500/30 text-center"
                 >
-                  <div className="text-xs text-slate-400 font-medium">SEARCHING FOR PLAYERS...</div>
+                  <div className="text-xs text-slate-400 font-medium">SEARCHING FOR PLAYERS (3v3)...</div>
                   <div className="flex justify-center gap-1 mt-2">
                     {[0, 1, 2].map(i => (
                       <motion.div
@@ -205,7 +286,7 @@ export const Lobby: React.FC = () => {
                   animate={{ opacity: 1, scale: 1 }}
                   className="glass rounded-xl p-3 border border-green-500/30 text-center"
                 >
-                  <div className="text-sm text-green-400 font-heading font-black">⚡ OPPONENT FOUND!</div>
+                  <div className="text-sm text-green-400 font-heading font-black">⚡ MATCH FOUND! PREPARING ARENA...</div>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -218,16 +299,29 @@ export const Lobby: React.FC = () => {
               <h3 className="font-heading font-bold text-red-400 tracking-wider">RED TEAM</h3>
             </div>
             <div className="space-y-3">
-              {TEAM_RED.map((name, i) => (
-                <div key={name} className="flex items-center gap-3 p-3 rounded-xl bg-white/5">
-                  <div className="text-2xl">{OPP_HEROES[i]}</div>
-                  <div className="flex-1">
-                    <div className="font-heading font-bold text-white text-sm">{name}</div>
-                    <div className="text-slate-500 text-xs">LV {24 + i * 3}</div>
+              {matchedRedTeam.length > 0 ? (
+                matchedRedTeam.map((player, i) => (
+                  <div key={player.username + i} className="flex items-center gap-3 p-3 rounded-xl bg-white/5">
+                    <div className="text-2xl">{HERO_ICONS[player.heroSlug] || '⚔️'}</div>
+                    <div className="flex-1">
+                      <div className="font-heading font-bold text-white text-sm">{player.username}</div>
+                      <div className="text-slate-500 text-xs">{player.trophies} 🏆</div>
+                    </div>
+                    <Check className="w-4 h-4 text-red-400" />
                   </div>
-                  {lobbyState === 'found' && <Check className="w-4 h-4 text-red-400" />}
-                </div>
-              ))}
+                ))
+              ) : (
+                DEFAULT_RED.map((name, i) => (
+                  <div key={name} className="flex items-center gap-3 p-3 rounded-xl bg-white/5">
+                    <div className="text-2xl">{DEFAULT_RED_HEROES[i]}</div>
+                    <div className="flex-1">
+                      <div className="font-heading font-bold text-white text-sm">{name}</div>
+                      <div className="text-slate-500 text-xs">LV {24 + i * 3}</div>
+                    </div>
+                    {lobbyState === 'found' && <Check className="w-4 h-4 text-red-400" />}
+                  </div>
+                ))
+              )}
             </div>
           </motion.div>
         </div>
@@ -253,7 +347,7 @@ export const Lobby: React.FC = () => {
               <div className="flex items-center gap-6 flex-wrap">
                 {[
                   { label: 'TROPHIES', value: `🏆 ${user.trophies.toLocaleString()}`, color: '#F59E0B' },
-                  { label: 'WIN RATE', value: `${((user.wins / user.matches) * 100).toFixed(1)}%`, color: '#10B981' },
+                  { label: 'WIN RATE', value: `${user.matches > 0 ? ((user.wins / user.matches) * 100).toFixed(1) : '0.0'}%`, color: '#10B981' },
                   { label: 'VICTORIES', value: user.wins.toString(), color: '#6C63FF' },
                 ].map((s) => (
                   <div key={s.label} className="text-center">

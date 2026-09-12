@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useAuthStore } from '../store/authStore';
+import { matchesAPI } from '../services/api';
 
 const ACHIEVEMENTS = [
   { id: 1, name: 'Champion', desc: 'Win 100 matches', icon: '🏆', unlocked: true },
@@ -217,6 +218,26 @@ function GamingRadarSkill() {
 export const Profile: React.FC = () => {
   const { user } = useAuthStore();
   const [activeTab, setActiveTab] = useState<'stats' | 'history' | 'achievements'>('stats');
+  const [matchHistory, setMatchHistory] = useState(MATCH_HISTORY);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    matchesAPI.history(user.id)
+      .then((res) => {
+        const rows = res.data?.matches;
+        if (Array.isArray(rows) && rows.length > 0) {
+          setMatchHistory(rows.map((m: any) => ({
+            mode: m.game_mode || 'Crystal Clash',
+            result: m.result || (m.winning_team === m.team ? 'WIN' : 'LOSS'),
+            kills: Number(m.kills) || 0,
+            crystals: Number(m.crystals) || 0,
+            trophies: m.trophy_delta !== undefined ? (m.trophy_delta >= 0 ? `+${m.trophy_delta}` : `${m.trophy_delta}`) : '+25',
+            time: 'Recently',
+          })));
+        }
+      })
+      .catch(() => {});
+  }, [user?.id]);
 
   if (!user) {
     return (
@@ -236,7 +257,7 @@ export const Profile: React.FC = () => {
     );
   }
 
-  const winRate = ((user.wins / user.matches) * 100).toFixed(1);
+  const winRate = user.matches > 0 ? ((user.wins / user.matches) * 100).toFixed(1) : '0.0';
 
   return (
     <div className="min-h-screen py-10 px-4 sm:px-6 lg:px-8">
@@ -413,7 +434,7 @@ export const Profile: React.FC = () => {
               <div className="text-center">CRYSTALS</div>
               <div className="text-right">TROPHIES</div>
             </div>
-            {MATCH_HISTORY.map((m, i) => (
+            {matchHistory.map((m, i) => (
               <motion.div
                 key={i}
                 initial={{ opacity: 0, x: -10 }}

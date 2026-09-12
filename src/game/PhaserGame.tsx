@@ -2,16 +2,23 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as Phaser from 'phaser';
 import { ArenaScene, GameEventCallbacks } from './scenes/ArenaScene';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useSound } from '../hooks/useSound';
 import { ntfyMatchVictory } from '../services/ntfy';
+import { networkManager } from './NetworkManager';
+import { useAuthStore } from '../store/authStore';
 
 export const PhaserGame: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const gameRef = useRef<Phaser.Game | null>(null);
   const sceneRef = useRef<ArenaScene | null>(null);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { playSound } = useSound();
+  const { accessToken } = useAuthStore();
+
+  const roomId = searchParams.get('room') || 'standalone-room';
+  const heroSlug = searchParams.get('hero') || 'blaze';
 
   const [blueScore, setBlueScore] = useState(0);
   const [redScore, setRedScore] = useState(0);
@@ -38,6 +45,18 @@ export const PhaserGame: React.FC = () => {
 
   useEffect(() => {
     if (!containerRef.current || gameRef.current) return;
+
+    // Ensure networkManager is connected
+    const connectSocket = async () => {
+      if (!networkManager.connected) {
+        try {
+          await networkManager.connect(accessToken || 'guest-jwt-token');
+        } catch (e) {
+          console.warn('[PhaserGame] Socket connection warning:', e);
+        }
+      }
+    };
+    connectSocket();
 
     const callbacks: GameEventCallbacks = {
       onScoreUpdate: (blue, red) => {
@@ -81,7 +100,12 @@ export const PhaserGame: React.FC = () => {
     game.events.once('ready', () => {
       const arena = game.scene.getScene('ArenaScene') as ArenaScene;
       sceneRef.current = arena;
-      arena.scene.restart({ callbacks });
+      arena.scene.restart({
+        callbacks,
+        roomId,
+        heroSlug,
+        mySocketId: networkManager.myId || '',
+      });
     });
 
     const timer = setInterval(() => {

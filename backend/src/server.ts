@@ -173,33 +173,32 @@ io.on('connection', (socket) => {
     });
   });
 
-  // ── Match persistence ────────────────────────────────────────────────────────
-
-  matchmaker.on('match:complete', async (data) => {
-    // Forward to matches API route for DB persistence
-    try {
-      const response = await fetch(`http://localhost:${PORT}/api/matches/complete`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-internal-secret': process.env.INTERNAL_SECRET || 'internal_secret_CHANGE_ME',
-        },
-        body: JSON.stringify(data),
-      });
-      if (!response.ok) {
-        console.error('[Server] Match persist failed:', await response.text());
-      }
-    } catch (err) {
-      console.error('[Server] Match persist error:', err);
-    }
-  });
-
   // ── Disconnect ───────────────────────────────────────────────────────────────
 
   socket.on('disconnect', (reason) => {
     console.log(`[Socket.IO] ${username} (${socket.id}) disconnected — ${reason}`);
     matchmaker.handleDisconnect(socket.id);
   });
+});
+
+// ── Match persistence ────────────────────────────────────────────────────────
+matchmaker.on('match:complete', async (data) => {
+  // Forward to matches API route for DB persistence
+  try {
+    const response = await fetch(`http://localhost:${PORT}/api/matches/complete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-secret': process.env.INTERNAL_SECRET || 'internal_secret_CHANGE_ME',
+      },
+      body: JSON.stringify(data),
+    });
+    if (!response.ok) {
+      console.error('[Server] Match persist failed:', await response.text());
+    }
+  } catch (err) {
+    console.error('[Server] Match persist error:', err);
+  }
 });
 
 // ─── Server Startup ───────────────────────────────────────────────────────────

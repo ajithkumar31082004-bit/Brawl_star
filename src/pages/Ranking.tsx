@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Trophy, Target, TrendingUp, Star } from 'lucide-react';
-import { LEADERBOARD_DATA } from '../data/leaderboard';
+import { Trophy, Target, TrendingUp, Star, ChevronLeft, ChevronRight } from 'lucide-react';
+import { LEADERBOARD_DATA, LeaderboardEntry } from '../data/leaderboard';
+import { leaderboardAPI } from '../services/api';
+import { useAuthStore } from '../store/authStore';
 
 const RANK_MEDAL: Record<number, string> = { 1: '🥇', 2: '🥈', 3: '🥉' };
 const RANK_TIER: Record<string, { label: string; color: string; emoji: string }> = {
@@ -21,6 +23,32 @@ const SEASON_REWARDS = [
 
 export const Ranking: React.FC = () => {
   const [activeTab, setActiveTab] = useState('GLOBAL');
+  const [page, setPage] = useState(1);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>(LEADERBOARD_DATA);
+  const [loading, setLoading] = useState(false);
+  const { user } = useAuthStore();
+
+  useEffect(() => {
+    setLoading(true);
+    leaderboardAPI.global(page, 20)
+      .then((res) => {
+        const rows = res.data?.leaderboard || res.data?.users;
+        if (Array.isArray(rows) && rows.length > 0) {
+          setLeaderboard(rows.map((row: any, idx: number) => ({
+            rank: (page - 1) * 20 + idx + 1,
+            username: row.username,
+            avatar: row.avatar || '👤',
+            trophies: Number(row.trophies) || 0,
+            victories: Number(row.wins) || 0,
+            winRate: row.matches > 0 ? Number(((row.wins / row.matches) * 100).toFixed(1)) : 0,
+            country: '🌐 Global',
+            isCurrentUser: user ? (row.id === user.id || row.username === user.username) : false,
+          })));
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [page, user]);
 
   return (
     <div className="min-h-screen py-10 px-4">
@@ -91,7 +119,7 @@ export const Ranking: React.FC = () => {
 
             {/* Rows */}
             <div className="space-y-2">
-              {LEADERBOARD_DATA.map((entry, i) => (
+              {leaderboard.map((entry, i) => (
                 <motion.div
                   key={entry.rank}
                   initial={{ opacity: 0, x: -20 }}
@@ -147,6 +175,25 @@ export const Ranking: React.FC = () => {
                   </div>
                 </motion.div>
               ))}
+            </div>
+
+            {/* Pagination */}
+            <div className="flex items-center justify-between mt-4 px-2">
+              <button
+                disabled={page <= 1 || loading}
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                className="glass px-3 py-1.5 rounded-xl text-xs font-heading font-bold text-slate-400 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 cursor-pointer"
+              >
+                <ChevronLeft className="w-4 h-4" /> PREV
+              </button>
+              <span className="text-xs font-mono text-slate-400">PAGE {page}</span>
+              <button
+                disabled={leaderboard.length < 20 || loading}
+                onClick={() => setPage(p => p + 1)}
+                className="glass px-3 py-1.5 rounded-xl text-xs font-heading font-bold text-slate-400 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 cursor-pointer"
+              >
+                NEXT <ChevronRight className="w-4 h-4" />
+              </button>
             </div>
           </div>
 

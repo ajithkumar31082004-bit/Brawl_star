@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, Filter } from 'lucide-react';
 import { HEROES } from '../data/heroes';
 import type { Hero } from '../data/heroes';
 import { HeroCard } from '../components/hero/HeroCard';
+import { heroesAPI } from '../services/api';
 
 const CLASSES = ['ALL', 'DAMAGE', 'ASSASSIN', 'TANK', 'SUPPORT', 'CONTROLLER'];
 const RARITIES = ['All', 'Legendary', 'Epic', 'Super Rare', 'Rare'];
@@ -18,12 +19,35 @@ const CLASS_COLORS: Record<string, string> = {
 };
 
 export const Heroes: React.FC = () => {
+  const [heroes, setHeroes] = useState<Hero[]>(HEROES);
   const [selectedClass, setSelectedClass] = useState('ALL');
   const [selectedRarity, setSelectedRarity] = useState('All');
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'attack' | 'health'>('name');
 
-  const filtered = HEROES.filter((h) => {
+  useEffect(() => {
+    heroesAPI.all()
+      .then((res) => {
+        const rows = res.data?.heroes;
+        if (Array.isArray(rows) && rows.length > 0) {
+          // Merge dynamic stats from DB with existing UI hero assets
+          const merged = HEROES.map(h => {
+            const dbHero = rows.find((r: any) => r.slug === h.id);
+            if (!dbHero) return h;
+            return {
+              ...h,
+              health: Number(dbHero.health) || h.health,
+              attack: Number(dbHero.attack_damage) || h.attack,
+              speed: Number(dbHero.movement_speed) || h.speed,
+            };
+          });
+          setHeroes(merged);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const filtered = heroes.filter((h) => {
     const matchClass = selectedClass === 'ALL' || h.class.toUpperCase() === selectedClass;
     const matchRarity = selectedRarity === 'All' || h.rarity === selectedRarity;
     const matchSearch = h.name.toLowerCase().includes(search.toLowerCase());
