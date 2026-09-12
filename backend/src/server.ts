@@ -118,6 +118,12 @@ io.on('connection', (socket) => {
   const { userId, username } = socket.data as { userId: string; username: string };
   console.log(`[Socket.IO] ${username} (${socket.id}) connected`);
 
+  // Check if player has an active live match to reconnect to
+  const wasReconnected = matchmaker.handleReconnect(socket.id, userId);
+  if (wasReconnected) {
+    console.log(`[Socket.IO] 🔄 ${username} reconnected to ongoing match!`);
+  }
+
   // ── Matchmaking ──────────────────────────────────────────────────────────────
 
   socket.on('matchmaking:enter', ({

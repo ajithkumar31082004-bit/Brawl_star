@@ -88,22 +88,27 @@ export class Matchmaker extends EventEmitter {
     }
   }
 
-  /** Called when a socket disconnects — clean up queue + room */
+  /** Called when a socket disconnects — clean up queue and trigger 30s reconnect window */
   handleDisconnect(socketId: string): void {
     this.dequeue(socketId);
 
-    // Remove from any active room
-    for (const [roomId, room] of this.rooms.entries()) {
+    // Notify room of disconnect for grace period / bot AI
+    for (const room of this.rooms.values()) {
       if (room.players.has(socketId)) {
-        room.removePlayer(socketId);
-        this.io.to(roomId).emit('match:player_left', { socketId });
-
-        if (room.playerCount === 0) {
-          this.rooms.delete(roomId);
-        }
+        room.handlePlayerDisconnect(socketId);
         break;
       }
     }
+  }
+
+  /** Called when a client reconnects — checks if they belong to an active live match */
+  handleReconnect(socketId: string, userId: string): boolean {
+    for (const room of this.rooms.values()) {
+      if (room.reconnectPlayer(socketId, userId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // ─── Tick: try to form matches ───────────────────────────────────────────────

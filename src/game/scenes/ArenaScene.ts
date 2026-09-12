@@ -1,5 +1,13 @@
 import * as Phaser from 'phaser';
-import { networkManager, GameSnapshot, PlayerState } from '../NetworkManager';
+import { networkManager, GameSnapshot, PlayerState, SuperEffectData } from '../NetworkManager';
+import {
+  MAP_WIDTH,
+  MAP_HEIGHT,
+  ARENA_WALLS,
+  ARENA_BUSHES,
+  CRYSTAL_MINE,
+  resolveWallSliding,
+} from '../MapLayout';
 
 // ─── Callbacks from PhaserGame (React HUD) ─────────────────────────────────
 
@@ -7,34 +15,31 @@ export interface GameEventCallbacks {
   onScoreUpdate:  (blue: number, red: number) => void;
   onHealthUpdate: (current: number, max: number, superCharge: number, powerCubes: number, ammo: number) => void;
   onGameOver:     (won: boolean, stats: { kills: number; deaths: number; crystals: number; damage: number }) => void;
+  onWinAlert?:    (message: string | null) => void;
 }
 
 // ─── Init data from PhaserGame ──────────────────────────────────────────────
 
 export interface ArenaInitData {
   callbacks:  GameEventCallbacks;
-  roomId:     string;
-  heroSlug:   string;
-  mySocketId: string;
+  roomId?:    string;
+  heroSlug?:  string;
+  mySocketId?:string;
 }
 
 // ─── Internal sprite registry ───────────────────────────────────────────────
 
 interface PlayerSprite {
-  body:      Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
-  nameLabel: Phaser.GameObjects.Text;
-  hpBarBg:   Phaser.GameObjects.Rectangle;
-  hpBar:     Phaser.GameObjects.Rectangle;
-  ammoBar:   Phaser.GameObjects.Rectangle[];
-  deadOverlay?: Phaser.GameObjects.Graphics;
-  team:      'blue' | 'red';
-  isLocal:   boolean;
+  body:        Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
+  nameLabel:   Phaser.GameObjects.Text;
+  hpBarBg:     Phaser.GameObjects.Rectangle;
+  hpBar:       Phaser.GameObjects.Rectangle;
+  ammoBar:     Phaser.GameObjects.Rectangle[];
+  deadOverlay?:Phaser.GameObjects.Graphics;
+  team:        'blue' | 'red';
+  isLocal:     boolean;
 }
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-const MAP_W   = 1400;
-const MAP_H   = 1000;
 const HERO_TEXTURES: Record<string, string> = {
   blaze:  'hero_blaze',
   volt:   'hero_volt',
@@ -49,46 +54,46 @@ const HERO_TEXTURES: Record<string, string> = {
 // ─── ArenaScene ─────────────────────────────────────────────────────────────
 
 export class ArenaScene extends Phaser.Scene {
-  // Server data
   private callbacks!: GameEventCallbacks;
-  private roomId  = '';
+  private roomId   = '';
   private heroSlug = 'blaze';
   private mySocketId = '';
 
   // Sprite registry keyed by socketId
   private playerSprites = new Map<string, PlayerSprite>();
 
-  // Bullet + crystal visuals
-  private bulletSprites = new Map<string, Phaser.GameObjects.Arc>();
+  // Visuals
+  private bulletSprites  = new Map<string, Phaser.GameObjects.Arc>();
   private crystalSprites = new Map<string, Phaser.GameObjects.Image>();
+  private aoeVisuals     = new Map<string, Phaser.GameObjects.Arc>();
 
-  // Graphics layers
+  // Graphics & Containers
   private aimGraphics!: Phaser.GameObjects.Graphics;
-  private walls!: Phaser.Physics.Arcade.StaticGroup;
-  private bushes!: Phaser.Physics.Arcade.StaticGroup;
+  private wallsGroup!:  Phaser.GameObjects.Group;
+  private bushesGroup!: Phaser.GameObjects.Group;
+  private mineCore!:    Phaser.GameObjects.Arc;
+  private mineRing!:    Phaser.GameObjects.Arc;
 
-  // Client-side input state (prediction)
+  // Keyboard & Aim Input
   private wasdKeys!: Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  private aimTarget  = { x: 0, y: 0 };
-  private isFiring   = false;
-  private seqNumber  = 0;
+  private aimTarget = { x: 0, y: 0 };
+  private isFiring  = false;
 
-  // Local player predicted position
-  private predictX = 280;
+  // Client-Side Prediction (Local Player)
+  private predictX = 200;
   private predictY = 500;
+  private inputHistory: Array<{ seq: number; dx: number; dy: number; dt: number }> = [];
 
-  // Last known server state for local player
-  private lastLocalServerState: PlayerState | null = null;
+  // Cached HUD state
+  private cachedHp    = 4800;
+  private cachedMaxHp = 4800;
+  private cachedAmmo  = 3;
+  private cachedSuper = 0;
 
-  // HUD state cached from server
-  private cachedHp         = 5200;
-  private cachedMaxHp      = 5200;
-  private cachedAmmo       = 3;
-  private cachedSuper      = 0;
-
-  // Countdown
+  // Overlays
   private countdownText!: Phaser.GameObjects.Text;
+  private alertBanner!:   Phaser.GameObjects.Text;
   private isMatchRunning = false;
 
   constructor() {
@@ -105,27 +110,24 @@ export class ArenaScene extends Phaser.Scene {
   // ─── create ───────────────────────────────────────────────────────────────
 
   create() {
-    this.physics.world.setBounds(0, 0, MAP_W, MAP_H);
+    this.physics.world.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
 
     this.generateArenaTextures();
     this.renderMapEnvironment();
-
-    this.walls  = this.physics.add.staticGroup();
-    this.bushes = this.physics.add.staticGroup();
     this.buildMapObstacles();
 
     this.aimGraphics = this.add.graphics().setDepth(25);
 
-    this.cameras.main.setBounds(0, 0, MAP_W, MAP_H);
+    this.cameras.main.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
     this.cameras.main.setZoom(1.05);
 
-    // Keyboard
+    // Keyboard inputs
     if (this.input.keyboard) {
       this.cursors  = this.input.keyboard.createCursorKeys();
       this.wasdKeys = this.input.keyboard.addKeys('W,A,S,D') as Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>;
     }
 
-    // Aim via pointer
+    // Pointer aiming & firing
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
       this.aimTarget = { x: p.worldX, y: p.worldY };
     });
@@ -138,7 +140,7 @@ export class ArenaScene extends Phaser.Scene {
     });
 
     // Countdown overlay
-    this.countdownText = this.add.text(MAP_W / 2, MAP_H / 2, '', {
+    this.countdownText = this.add.text(MAP_WIDTH / 2, MAP_HEIGHT / 2, '', {
       fontFamily: 'Montserrat Black, sans-serif',
       fontSize: '96px',
       color: '#FACC15',
@@ -146,16 +148,29 @@ export class ArenaScene extends Phaser.Scene {
       strokeThickness: 8,
     }).setOrigin(0.5).setDepth(50).setScrollFactor(0);
 
+    // Top Alert Banner (for Crystal 15s Countdown)
+    this.alertBanner = this.add.text(MAP_WIDTH / 2, 70, '', {
+      fontFamily: 'Montserrat Black, sans-serif',
+      fontSize: '20px',
+      color: '#FFFFFF',
+      backgroundColor: '#991B1B',
+      padding: { x: 16, y: 8 },
+    }).setOrigin(0.5).setDepth(45).setScrollFactor(0).setVisible(false);
+
     // Wire Socket.IO callbacks into scene
     networkManager.setCallbacks({
-      onGameState:      (snapshot) => this.renderServerState(snapshot),
-      onPlayerDamaged:  (data) => this.showDamageText(data.targetId, data.damage),
-      onPlayerDied:     (data) => this.handlePlayerDeath(data.victimId, data.killerId, data.killerName ?? '', data.respawnInMs),
-      onPlayerRespawned:(data) => this.handlePlayerRespawn(data.playerId, data.x, data.y),
-      onCountdown:      (data) => this.showCountdown(data.seconds),
-      onGameStart:      () => { this.isMatchRunning = true; this.countdownText.setVisible(false); },
-      onGameOver:       (data) => this.handleGameOver(data as Record<string, unknown>),
-      onDisconnect:     (reason) => console.warn('[Arena] Disconnected:', reason),
+      onGameState:          (snapshot) => this.renderServerState(snapshot),
+      onPlayerDamaged:      (data) => this.handlePlayerDamaged(data.targetId, data.damage, data.shield),
+      onPlayerDied:         (data) => this.handlePlayerDeath(data.victimId, data.killerId, data.killerName ?? '', data.respawnInMs),
+      onPlayerRespawned:    (data) => this.handlePlayerRespawn(data.playerId, data.x, data.y),
+      onSuperEffect:        (data) => this.renderSuperEffect(data),
+      onCrystalCollected:   (data) => this.handleCrystalPickup(data.collectorId, data.blueScore, data.redScore),
+      onWinCountdownStart:  (data) => this.showWinCountdown(data.team, data.secondsRemaining),
+      onWinCountdownCancelled: () => this.hideWinCountdown(),
+      onCountdown:          (data) => this.showCountdown(data.seconds),
+      onGameStart:          () => { this.isMatchRunning = true; this.countdownText.setVisible(false); },
+      onGameOver:           (data) => this.handleGameOver(data as Record<string, unknown>),
+      onDisconnect:         (reason) => console.warn('[Arena] Disconnected:', reason),
     });
   }
 
@@ -164,7 +179,7 @@ export class ArenaScene extends Phaser.Scene {
   update(_time: number, delta: number) {
     const dt = delta / 1000;
 
-    // Gather input
+    // Gather movement input
     let dx = 0;
     let dy = 0;
     if (this.wasdKeys?.A.isDown || this.cursors?.left.isDown)  dx -= 1;
@@ -172,27 +187,23 @@ export class ArenaScene extends Phaser.Scene {
     if (this.wasdKeys?.W.isDown || this.cursors?.up.isDown)    dy -= 1;
     if (this.wasdKeys?.S.isDown || this.cursors?.down.isDown)  dy += 1;
 
-    // Normalise diagonal
+    // Normalise diagonal movement
     if (dx !== 0 && dy !== 0) {
       dx *= 0.7071;
       dy *= 0.7071;
     }
 
-    // Client-side prediction for local player
-    const speed = 80 * 2; // pixels/s (matches server movementSpeed * 2 for snappiness)
-    this.predictX = Phaser.Math.Clamp(this.predictX + dx * speed * dt, 24, MAP_W - 24);
-    this.predictY = Phaser.Math.Clamp(this.predictY + dy * speed * dt, 24, MAP_H - 24);
+    // Client-side prediction with wall sliding
+    const speed = 290;
+    const targetX = Phaser.Math.Clamp(this.predictX + dx * speed * dt, 24, MAP_WIDTH - 24);
+    const targetY = Phaser.Math.Clamp(this.predictY + dy * speed * dt, 24, MAP_HEIGHT - 24);
+    const resolved = resolveWallSliding(this.predictX, this.predictY, targetX, targetY, 24);
 
-    // Move local sprite to predicted position
-    const localSprite = this.playerSprites.get(this.mySocketId);
-    if (localSprite) {
-      localSprite.body.setPosition(this.predictX, this.predictY);
-      this.cameras.main.startFollow(localSprite.body, true, 0.08, 0.08);
-      this.updatePlayerLabelPos(localSprite);
-    }
+    this.predictX = resolved.x;
+    this.predictY = resolved.y;
 
-    // Send input to server (NetworkManager batches at 20 TPS)
-    networkManager.setInput({
+    // Send input to server and record sequence
+    const seq = networkManager.setInput({
       dx,
       dy,
       aimX:       this.aimTarget.x,
@@ -201,25 +212,48 @@ export class ArenaScene extends Phaser.Scene {
       usingSuper: false,
     });
 
-    // Draw aim indicator
+    this.inputHistory.push({ seq, dx, dy, dt });
+    if (this.inputHistory.length > 60) this.inputHistory.shift();
+
+    // Position local player sprite at predicted location
+    const localSprite = this.playerSprites.get(this.mySocketId);
+    if (localSprite && !localSprite.deadOverlay?.visible) {
+      localSprite.body.setPosition(this.predictX, this.predictY);
+      this.cameras.main.startFollow(localSprite.body, true, 0.1, 0.1);
+      this.updatePlayerLabelPos(localSprite);
+    }
+
+    // Aim Line
     this.drawAimLine();
+
+    // Rotate Crystal Mine Ring
+    if (this.mineRing) {
+      this.mineRing.rotation += 0.02;
+    }
   }
 
-  // ─── Server state renderer ───────────────────────────────────────────────
+  // ─── Server State Renderer ────────────────────────────────────────────────
 
   private renderServerState(snapshot: GameSnapshot) {
-    // Reconcile local player position with server
+    // 1. Reconcile Local Player
     const me = snapshot.players.find(p => p.id === this.mySocketId);
     if (me) {
-      // Snap prediction if too far off (teleport detection / reconcile)
-      const dist = Phaser.Math.Distance.Between(this.predictX, this.predictY, me.x, me.y);
-      if (dist > 80) {
+      const errDist = Phaser.Math.Distance.Between(this.predictX, this.predictY, me.x, me.y);
+      if (errDist > 40) {
+        // Correct position and replay pending inputs newer than me.lastSeq
         this.predictX = me.x;
         this.predictY = me.y;
+        this.inputHistory = this.inputHistory.filter(item => item.seq > me.lastSeq);
+        for (const input of this.inputHistory) {
+          const tX = Phaser.Math.Clamp(this.predictX + input.dx * 290 * input.dt, 24, MAP_WIDTH - 24);
+          const tY = Phaser.Math.Clamp(this.predictY + input.dy * 290 * input.dt, 24, MAP_HEIGHT - 24);
+          const res = resolveWallSliding(this.predictX, this.predictY, tX, tY, 24);
+          this.predictX = res.x;
+          this.predictY = res.y;
+        }
       }
-      this.lastLocalServerState = me;
 
-      // Update HUD from server
+      // Update HUD
       if (
         me.hp !== this.cachedHp ||
         me.maxHp !== this.cachedMaxHp ||
@@ -230,146 +264,238 @@ export class ArenaScene extends Phaser.Scene {
         this.cachedMaxHp = me.maxHp;
         this.cachedAmmo  = me.ammo;
         this.cachedSuper = me.superCharge;
-        this.callbacks.onHealthUpdate(me.hp, me.maxHp, me.superCharge, 0, me.ammo);
+        this.callbacks?.onHealthUpdate(me.hp, me.maxHp, me.superCharge, me.crystals, me.ammo);
       }
     }
 
-    // Update score
-    this.callbacks.onScoreUpdate(snapshot.blueScore, snapshot.redScore);
+    // 2. Render Players & Remote Interpolation
+    const activeIds = new Set<string>();
 
-    // Update remote player sprites
-    snapshot.players.forEach(p => {
-      if (p.id === this.mySocketId) return; // handled by prediction
-      const existing = this.playerSprites.get(p.id);
-      if (existing) {
-        if (!p.isDead) {
-          existing.body.setPosition(p.x, p.y);
-          this.updatePlayerLabelPos(existing);
-          this.updateHpBar(existing, p.hp, p.maxHp);
+    for (const p of snapshot.players) {
+      activeIds.add(p.id);
+      const isLocal = p.id === this.mySocketId;
+      let ps = this.playerSprites.get(p.id);
+
+      if (!ps) {
+        ps = this.createPlayerSprite(p, isLocal);
+        this.playerSprites.set(p.id, ps);
+      }
+
+      // If remote, interpolate position smoothly
+      if (!isLocal) {
+        this.tweens.add({
+          targets: ps.body,
+          x: p.x,
+          y: p.y,
+          duration: 33,
+          ease: 'Linear',
+        });
+        this.updatePlayerLabelPos(ps);
+
+        // Bush Stealth Visibility Logic
+        if (p.isInBush) {
+          if (me && p.team !== me.team) {
+            // Enemy in bush: visible only if within 100px proximity
+            const dist = Phaser.Math.Distance.Between(me.x, me.y, p.x, p.y);
+            if (dist > 100) {
+              ps.body.setAlpha(0);
+              ps.nameLabel.setAlpha(0);
+              ps.hpBar.setAlpha(0);
+              ps.hpBarBg.setAlpha(0);
+            } else {
+              ps.body.setAlpha(0.45);
+              ps.nameLabel.setAlpha(0.6);
+              ps.hpBar.setAlpha(0.6);
+              ps.hpBarBg.setAlpha(0.6);
+            }
+          } else {
+            // Teammate in bush
+            ps.body.setAlpha(0.6);
+            ps.nameLabel.setAlpha(0.8);
+            ps.hpBar.setAlpha(0.8);
+            ps.hpBarBg.setAlpha(0.8);
+          }
+        } else {
+          ps.body.setAlpha(1.0);
+          ps.nameLabel.setAlpha(1.0);
+          ps.hpBar.setAlpha(1.0);
+          ps.hpBarBg.setAlpha(1.0);
         }
       } else {
-        this.spawnPlayerSprite(p);
+        // Local player in bush
+        ps.body.setAlpha(p.isInBush ? 0.65 : 1.0);
       }
-    });
 
-    // Spawn local sprite if not yet created (first state packet)
-    if (me && !this.playerSprites.has(this.mySocketId)) {
-      this.spawnPlayerSprite({ ...me, x: this.predictX, y: this.predictY });
-      this.predictX = me.x;
-      this.predictY = me.y;
+      // Update HP bar
+      const pct = Math.max(0, Math.min(1, p.hp / (p.maxHp || 1)));
+      ps.hpBar.width = Math.round(44 * pct);
+      ps.hpBar.fillColor = p.team === 'blue' ? 0x00D9FF : 0xEF4444;
+
+      // Update Ammo pips
+      for (let i = 0; i < 3; i++) {
+        ps.ammoBar[i].fillColor = i < p.ammo ? 0xF97316 : 0x334155;
+      }
     }
 
-    // Crystals — sync with server
-    const serverCrystalIds = new Set(snapshot.crystals.map(c => c.id));
-    this.crystalSprites.forEach((sprite, id) => {
-      if (!serverCrystalIds.has(id)) {
-        sprite.destroy();
-        this.crystalSprites.delete(id);
+    // Cleanup disconnected sprites
+    for (const [id, ps] of this.playerSprites.entries()) {
+      if (!activeIds.has(id)) {
+        ps.body.destroy();
+        ps.nameLabel.destroy();
+        ps.hpBarBg.destroy();
+        ps.hpBar.destroy();
+        ps.ammoBar.forEach(a => a.destroy());
+        this.playerSprites.delete(id);
       }
-    });
-    snapshot.crystals.forEach(c => {
-      if (!this.crystalSprites.has(c.id)) {
-        const img = this.add.image(c.x, c.y, 'gem_crystal').setDepth(13);
-        this.crystalSprites.set(c.id, img);
-      } else {
-        this.crystalSprites.get(c.id)!.setPosition(c.x, c.y);
-      }
-    });
+    }
 
-    // Bullets — sync with server
-    const serverBulletIds = new Set(snapshot.bullets.map(b => b.id));
-    this.bulletSprites.forEach((sprite, id) => {
-      if (!serverBulletIds.has(id)) {
-        sprite.destroy();
+    // 3. Render Bullets
+    const activeBulletIds = new Set<string>();
+    for (const b of snapshot.bullets) {
+      activeBulletIds.add(b.id);
+      let bs = this.bulletSprites.get(b.id);
+      if (!bs) {
+        bs = this.add.circle(b.x, b.y, 6, 0xFACC15).setDepth(20);
+        this.bulletSprites.set(b.id, bs);
+      } else {
+        bs.setPosition(b.x, b.y);
+      }
+    }
+    for (const [id, bs] of this.bulletSprites.entries()) {
+      if (!activeBulletIds.has(id)) {
+        bs.destroy();
         this.bulletSprites.delete(id);
       }
-    });
-    snapshot.bullets.forEach(b => {
-      if (!this.bulletSprites.has(b.id)) {
-        const circle = this.add.circle(b.x, b.y, 8, 0xf97316).setDepth(16);
-        this.bulletSprites.set(b.id, circle as unknown as Phaser.GameObjects.Arc);
-      } else {
-        this.bulletSprites.get(b.id)!.setPosition(b.x, b.y);
+    }
+
+    // 4. Render Crystals
+    const activeCrystalIds = new Set<string>();
+    for (const c of snapshot.crystals) {
+      activeCrystalIds.add(c.id);
+      let cs = this.crystalSprites.get(c.id);
+      if (!cs) {
+        cs = this.add.image(c.x, c.y, 'gem_crystal').setDepth(15);
+        this.tweens.add({
+          targets: cs,
+          y: c.y - 6,
+          duration: 700,
+          yoyo: true,
+          repeat: -1,
+          ease: 'Sine.easeInOut',
+        });
+        this.crystalSprites.set(c.id, cs);
       }
-    });
-  }
-
-  // ─── Sprite management ────────────────────────────────────────────────────
-
-  private spawnPlayerSprite(p: PlayerState) {
-    const isLocal  = p.id === this.mySocketId;
-    const texKey   = isLocal
-      ? (HERO_TEXTURES[this.heroSlug] || 'hero_blaze')
-      : (p.team === 'blue' ? 'hero_ally' : 'hero_enemy');
-
-    const sprite = this.physics.add.sprite(p.x, p.y, texKey);
-    sprite.setDepth(15);
-    sprite.setCircle(22, 4, 4);
-    sprite.setCollideWorldBounds(true);
-    this.physics.add.collider(sprite, this.walls);
-
-    // Name label
-    const nameLabel = this.add.text(p.x, p.y - 40, p.username, {
-      fontFamily: 'Montserrat, sans-serif',
-      fontSize: '11px',
-      color: isLocal ? '#00D9FF' : p.team === 'blue' ? '#60A5FA' : '#F87171',
-      stroke: '#000000',
-      strokeThickness: 3,
-    }).setOrigin(0.5).setDepth(20);
-
-    // HP bar
-    const barW = 44;
-    const hpBarBg = this.add.rectangle(p.x, p.y - 34, barW, 6, 0x000000, 0.7).setDepth(21);
-    const hpBar   = this.add.rectangle(p.x - barW / 2, p.y - 34, barW, 6, isLocal ? 0x22c55e : p.team === 'blue' ? 0x60a5fa : 0xef4444, 1).setDepth(22).setOrigin(0, 0.5);
-
-    // Ammo dots (local only)
-    const ammoBar: Phaser.GameObjects.Rectangle[] = [];
-    if (isLocal) {
-      for (let i = 0; i < 3; i++) {
-        const dot = this.add.rectangle(p.x - 14 + i * 14, p.y - 27, 11, 3, 0xf97316).setDepth(22);
-        ammoBar.push(dot);
+    }
+    for (const [id, cs] of this.crystalSprites.entries()) {
+      if (!activeCrystalIds.has(id)) {
+        cs.destroy();
+        this.crystalSprites.delete(id);
       }
     }
 
-    // Local player indicator ring
-    if (isLocal) {
-      this.add.circle(p.x, p.y, 26, 0x00d9ff, 0.15).setDepth(14);
+    // 5. Update Score
+    this.callbacks?.onScoreUpdate(snapshot.blueScore, snapshot.redScore);
+  }
+
+  // ─── Super Visual Effects ──────────────────────────────────────────────────
+
+  private renderSuperEffect(data: SuperEffectData) {
+    switch (data.type) {
+      case 'fire_storm': {
+        const x = data.x ?? MAP_WIDTH / 2;
+        const y = data.y ?? MAP_HEIGHT / 2;
+        const r = data.radius ?? 130;
+        const fire = this.add.circle(x, y, r, 0xEF4444, 0.35).setDepth(14);
+        this.tweens.add({
+          targets: fire,
+          alpha: { from: 0.4, to: 0.15 },
+          duration: 350,
+          yoyo: true,
+          repeat: 8,
+          onComplete: () => fire.destroy(),
+        });
+        this.cameras.main.shake(200, 0.01);
+        break;
+      }
+
+      case 'lightning_dash': {
+        const line = this.add.graphics().setDepth(26);
+        line.lineStyle(6, 0x38BDF8, 1);
+        line.lineBetween(data.startX ?? 0, data.startY ?? 0, data.endX ?? 0, data.endY ?? 0);
+        this.tweens.add({
+          targets: line,
+          alpha: 0,
+          duration: 350,
+          onComplete: () => line.destroy(),
+        });
+        this.cameras.main.shake(180, 0.015);
+        break;
+      }
+
+      case 'hammer_quake': {
+        const x = data.x ?? 0;
+        const y = data.y ?? 0;
+        const ring = this.add.circle(x, y, 10).setStrokeStyle(5, 0xFACC15, 1).setDepth(26);
+        this.tweens.add({
+          targets: ring,
+          radius: data.radius ?? 170,
+          alpha: 0,
+          duration: 450,
+          onComplete: () => ring.destroy(),
+        });
+        this.cameras.main.shake(350, 0.025);
+        break;
+      }
+
+      case 'ice_burst': {
+        const x = data.x ?? 0;
+        const y = data.y ?? 0;
+        const frost = this.add.circle(x, y, data.radius ?? 180, 0x06B6D4, 0.4).setDepth(14);
+        this.tweens.add({
+          targets: frost,
+          alpha: 0,
+          duration: 600,
+          onComplete: () => frost.destroy(),
+        });
+        this.cameras.main.shake(150, 0.01);
+        break;
+      }
+
+      case 'star_beam': {
+        const x = data.x ?? 0;
+        const y = data.y ?? 0;
+        const aura = this.add.circle(x, y, data.radius ?? 240, 0x22C55E, 0.35).setDepth(14);
+        this.tweens.add({
+          targets: aura,
+          alpha: 0,
+          duration: 700,
+          onComplete: () => aura.destroy(),
+        });
+        break;
+      }
     }
-
-    const ps: PlayerSprite = { body: sprite, nameLabel, hpBarBg, hpBar, ammoBar, team: p.team, isLocal };
-    this.playerSprites.set(p.id, ps);
   }
 
-  private updatePlayerLabelPos(ps: PlayerSprite) {
-    const x = ps.body.x;
-    const y = ps.body.y;
-    ps.nameLabel.setPosition(x, y - 40);
-    ps.hpBarBg.setPosition(x, y - 34);
-    ps.hpBar.setPosition(x - 22, y - 34);
-    ps.ammoBar.forEach((dot, i) => dot.setPosition(x - 14 + i * 14, y - 27));
-  }
+  // ─── Combat & Particle Effects ─────────────────────────────────────────────
 
-  private updateHpBar(ps: PlayerSprite, hp: number, maxHp: number) {
-    const pct = Math.max(0, hp / maxHp);
-    const barW = 44;
-    ps.hpBar.setSize(barW * pct, 6);
-  }
-
-  // ─── Events from server ───────────────────────────────────────────────────
-
-  private showDamageText(targetId: string, damage: number) {
+  private handlePlayerDamaged(targetId: string, damage: number, shield?: number) {
     const ps = this.playerSprites.get(targetId);
     if (!ps) return;
-    const x = ps.body.x;
-    const y = ps.body.y - 25;
-    const label = this.add.text(x, y, `-${damage}`, {
-      fontFamily: 'Montserrat, sans-serif',
-      fontSize: '14px',
-      color: '#EF4444',
-      stroke: '#000000',
-      strokeThickness: 3,
-    }).setOrigin(0.5).setDepth(35);
-    this.tweens.add({ targets: label, y: y - 35, alpha: 0, duration: 900, onComplete: () => label.destroy() });
+
+    // Floating damage numbers
+    const color = shield && shield > 0 ? '#38BDF8' : '#EF4444';
+    this.showFloatingText(ps.body.x, ps.body.y - 28, `-${damage}`, color);
+
+    // Hit impact flash
+    ps.body.setTint(0xFFFFFF);
+    this.time.delayedCall(80, () => ps.body.clearTint());
+  }
+
+  private handleCrystalPickup(collectorId: string, _blue: number, _red: number) {
+    const ps = this.playerSprites.get(collectorId);
+    if (ps) {
+      this.showFloatingText(ps.body.x, ps.body.y - 24, '+1 💎', '#00D9FF');
+    }
   }
 
   private handlePlayerDeath(victimId: string, _killerId: string, killerName: string, respawnInMs: number) {
@@ -377,105 +503,72 @@ export class ArenaScene extends Phaser.Scene {
     if (!ps) return;
 
     ps.body.setVisible(false);
+    ps.nameLabel.setVisible(false);
+    ps.hpBar.setVisible(false);
+    ps.hpBarBg.setVisible(false);
+    ps.ammoBar.forEach(a => a.setVisible(false));
 
-    // Death FX
-    this.cameras.main.shake(200, 0.012);
-    const killText = killerName ? `💀 Eliminated by ${killerName}` : '💀 Eliminated!';
-    const label = this.add.text(ps.body.x, ps.body.y - 45, killText, {
-      fontFamily: 'Montserrat, sans-serif',
-      fontSize: '13px',
-      color: '#F59E0B',
-      stroke: '#000000',
-      strokeThickness: 3,
-    }).setOrigin(0.5).setDepth(35);
-    this.tweens.add({ targets: label, y: label.y - 40, alpha: 0, duration: 1400, onComplete: () => label.destroy() });
+    this.showFloatingText(ps.body.x, ps.body.y, `💀 ELIMINATED BY ${killerName}`, '#F43F5E');
 
-    if (victimId === this.mySocketId) {
-      // Show respawn countdown
-      this.time.delayedCall(respawnInMs - 100, () => {
-        ps.body.setVisible(true);
-      });
+    if (ps.isLocal) {
+      this.countdownText.setText(`RESPAWN IN ${Math.ceil(respawnInMs / 1000)}s`).setVisible(true);
     }
   }
 
   private handlePlayerRespawn(playerId: string, x: number, y: number) {
     const ps = this.playerSprites.get(playerId);
     if (!ps) return;
-    ps.body.setPosition(x, y);
-    ps.body.setVisible(true);
 
-    if (playerId === this.mySocketId) {
+    ps.body.setPosition(x, y).setVisible(true).setAlpha(1);
+    ps.nameLabel.setVisible(true).setAlpha(1);
+    ps.hpBar.setVisible(true).setAlpha(1);
+    ps.hpBarBg.setVisible(true).setAlpha(1);
+    ps.ammoBar.forEach(a => a.setVisible(true).setAlpha(1));
+
+    if (ps.isLocal) {
       this.predictX = x;
       this.predictY = y;
-      // Spawn invulnerability flash
-      this.tweens.add({ targets: ps.body, alpha: 0.3, duration: 200, yoyo: true, repeat: 5 });
+      this.countdownText.setVisible(false);
     }
   }
 
+  private showWinCountdown(team: string, seconds: number) {
+    this.alertBanner
+      .setText(`⚠️ ${team.toUpperCase()} TEAM HAS 10 GEMS! ${seconds}s TO WIN!`)
+      .setBackgroundColor(team === 'blue' ? '#0369A1' : '#991B1B')
+      .setVisible(true);
+  }
+
+  private hideWinCountdown() {
+    this.alertBanner.setVisible(false);
+  }
+
   private showCountdown(seconds: number) {
-    this.isMatchRunning = false;
-    this.countdownText.setVisible(true);
-    let remaining = seconds;
-    const tick = () => {
-      if (remaining <= 0) {
-        this.countdownText.setText('FIGHT!').setColor('#22C55E');
-        this.tweens.add({
-          targets: this.countdownText,
-          scaleX: 1.5, scaleY: 1.5, alpha: 0, duration: 600,
-          onComplete: () => this.countdownText.setVisible(false),
-        });
-        return;
-      }
-      this.countdownText.setText(String(remaining)).setColor('#FACC15');
-      this.tweens.add({ targets: this.countdownText, scaleX: 1.2, scaleY: 1.2, duration: 300, yoyo: true });
-      remaining--;
-      this.time.delayedCall(1000, tick);
-    };
-    tick();
+    if (seconds > 0) {
+      this.countdownText.setText(`${seconds}`).setVisible(true);
+    } else {
+      this.countdownText.setText('FIGHT!').setColor('#22C55E');
+      this.time.delayedCall(800, () => this.countdownText.setVisible(false));
+    }
   }
 
   private handleGameOver(data: Record<string, unknown>) {
-    const players = (data.players as Array<{ userId: string; won: boolean; kills: number; deaths: number; damageDealt: number; crystals: number }>) || [];
-    const myData = players.find(p => p.userId === this.mySocketId) || players[0];
-    const won = myData?.won ?? false;
+    this.isMatchRunning = false;
+    const winningTeam = data.winningTeam as string;
+    const localPlayer = this.playerSprites.get(this.mySocketId);
+    const won = localPlayer ? localPlayer.team === winningTeam : false;
 
-    this.callbacks.onGameOver(won, {
-      kills:    myData?.kills    ?? 0,
-      deaths:   myData?.deaths   ?? 0,
-      crystals: myData?.crystals ?? 0,
-      damage:   myData?.damageDealt ?? 0,
+    this.callbacks?.onGameOver(won, {
+      kills:    (data.kills as number)    ?? 0,
+      deaths:   (data.deaths as number)   ?? 0,
+      crystals: (data.crystals as number) ?? 0,
+      damage:   (data.damage as number)   ?? 0,
     });
   }
 
-  // ─── Aim line ─────────────────────────────────────────────────────────────
+  // ─── Public API (PhaserGame Buttons) ───────────────────────────────────────
 
-  private drawAimLine() {
-    this.aimGraphics.clear();
-    if (!this.isFiring) return;
-    const ps = this.playerSprites.get(this.mySocketId);
-    if (!ps) return;
-
-    const angle = Phaser.Math.Angle.Between(ps.body.x, ps.body.y, this.aimTarget.x, this.aimTarget.y);
-    const range = 260;
-    const endX = ps.body.x + Math.cos(angle) * range;
-    const endY = ps.body.y + Math.sin(angle) * range;
-
-    this.aimGraphics.lineStyle(3, 0x00d9ff, 0.8);
-    this.aimGraphics.beginPath();
-    this.aimGraphics.moveTo(ps.body.x, ps.body.y);
-    this.aimGraphics.lineTo(endX, endY);
-    this.aimGraphics.strokePath();
-    this.aimGraphics.lineStyle(1.5, 0xfacc15, 0.9);
-    this.aimGraphics.strokeCircle(endX, endY, 14);
-  }
-
-  // ─── Public API (PhaserGame buttons) ─────────────────────────────────────
-
-  /**
-   * Called by the Super button in PhaserGame HUD
-   */
   public activateSuper() {
-    // Send super input — server validates charge and applies effect
     networkManager.setInput({
       dx: 0, dy: 0,
       aimX: this.aimTarget.x, aimY: this.aimTarget.y,
@@ -485,26 +578,122 @@ export class ArenaScene extends Phaser.Scene {
     this.cameras.main.shake(250, 0.015);
   }
 
-  /**
-   * Dash gadget — client visual only, server validates
-   */
   public performDash() {
     const ps = this.playerSprites.get(this.mySocketId);
     if (!ps) return;
-    this.showFloatingText(ps.body.x, ps.body.y - 20, '💨 DASH', '#00D9FF');
+    this.showFloatingText(ps.body.x, ps.body.y - 20, '💨 GADGET', '#00D9FF');
   }
 
-  /** Called by touch attack button */
   public shootPlayerAttack(aimX: number, aimY: number) {
     this.aimTarget = { x: aimX, y: aimY };
     this.isFiring = true;
     this.time.delayedCall(100, () => { this.isFiring = false; });
   }
 
-  // ─── Map Building ─────────────────────────────────────────────────────────
+  // ─── Sprite & Environment Builders ────────────────────────────────────────
+
+  private createPlayerSprite(p: PlayerState, isLocal: boolean): PlayerSprite {
+    const textureKey = HERO_TEXTURES[p.heroSlug] || 'hero_blaze';
+    const body = this.physics.add.sprite(p.x, p.y, textureKey).setDepth(18);
+    body.setCollideWorldBounds(true);
+
+    const nameLabel = this.add.text(p.x, p.y - 34, p.username, {
+      fontFamily: 'Montserrat, sans-serif',
+      fontSize: '11px',
+      color: isLocal ? '#FACC15' : '#FFFFFF',
+      stroke: '#000000',
+      strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(19);
+
+    const hpBarBg = this.add.rectangle(p.x, p.y - 22, 46, 6, 0x000000, 0.7).setDepth(19);
+    const hpBar   = this.add.rectangle(p.x - 22, p.y - 22, 44, 4, p.team === 'blue' ? 0x00D9FF : 0xEF4444).setOrigin(0, 0.5).setDepth(20);
+
+    const ammoBar = [0, 1, 2].map((idx) => {
+      return this.add.rectangle(p.x - 16 + idx * 12, p.y - 16, 9, 3, 0xF97316).setOrigin(0, 0.5).setDepth(20);
+    });
+
+    return { body, nameLabel, hpBarBg, hpBar, ammoBar, team: p.team, isLocal };
+  }
+
+  private updatePlayerLabelPos(ps: PlayerSprite) {
+    const x = ps.body.x;
+    const y = ps.body.y;
+    ps.nameLabel.setPosition(x, y - 34);
+    ps.hpBarBg.setPosition(x, y - 22);
+    ps.hpBar.setPosition(x - 22, y - 22);
+    ps.ammoBar.forEach((bar, idx) => bar.setPosition(x - 16 + idx * 12, y - 16));
+  }
+
+  private drawAimLine() {
+    this.aimGraphics.clear();
+    const localSprite = this.playerSprites.get(this.mySocketId);
+    if (!localSprite) return;
+
+    const angle = Phaser.Math.Angle.Between(this.predictX, this.predictY, this.aimTarget.x, this.aimTarget.y);
+    const aimLen = 140;
+    const endX = this.predictX + Math.cos(angle) * aimLen;
+    const endY = this.predictY + Math.sin(angle) * aimLen;
+
+    this.aimGraphics.lineStyle(2, 0x00D9FF, 0.5);
+    this.aimGraphics.lineBetween(this.predictX, this.predictY, endX, endY);
+    this.aimGraphics.strokeCircle(endX, endY, 6);
+  }
+
+  private renderMapEnvironment() {
+    const g = this.add.graphics();
+    g.fillStyle(0x070D1E, 1);
+    g.fillRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
+
+    // Subtle Sci-Fi Grid
+    g.lineStyle(1, 0x1E293B, 0.35);
+    for (let x = 0; x < MAP_WIDTH; x += 60) g.lineBetween(x, 0, x, MAP_HEIGHT);
+    for (let y = 0; y < MAP_HEIGHT; y += 60) g.lineBetween(0, y, MAP_WIDTH, y);
+
+    // Base zones
+    g.fillStyle(0x0284C7, 0.08); g.fillRect(0, 0, 220, MAP_HEIGHT);
+    g.fillStyle(0xE11D48, 0.08); g.fillRect(MAP_WIDTH - 220, 0, 220, MAP_HEIGHT);
+
+    // Central Mine platform
+    g.fillStyle(0x0F172A, 0.9);
+    g.fillCircle(CRYSTAL_MINE.x, CRYSTAL_MINE.y, 85);
+    g.lineStyle(3, 0x00D9FF, 0.7);
+    g.strokeCircle(CRYSTAL_MINE.x, CRYSTAL_MINE.y, 85);
+
+    // Animated Mine Core & Energy Ring
+    this.mineCore = this.add.circle(CRYSTAL_MINE.x, CRYSTAL_MINE.y, 28, 0x00D9FF, 0.85).setDepth(8);
+    this.mineRing = this.add.circle(CRYSTAL_MINE.x, CRYSTAL_MINE.y, 42).setStrokeStyle(3, 0x38BDF8, 0.8).setDepth(9);
+
+    this.tweens.add({
+      targets: this.mineCore,
+      scale: 1.2,
+      alpha: 0.6,
+      duration: 1000,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
+  }
+
+  private buildMapObstacles() {
+    this.wallsGroup  = this.add.group();
+    this.bushesGroup = this.add.group();
+
+    // Render exact server bushes
+    for (const b of ARENA_BUSHES) {
+      const bush = this.add.rectangle(b.x + b.w / 2, b.y + b.h / 2, b.w, b.h, 0x064E3B, 0.75);
+      bush.setStrokeStyle(2, 0x10B981, 0.6).setDepth(10);
+      this.bushesGroup.add(bush);
+    }
+
+    // Render exact server walls
+    for (const w of ARENA_WALLS) {
+      const wall = this.add.rectangle(w.x + w.w / 2, w.y + w.h / 2, w.w, w.h, 0x1E1B4B);
+      wall.setStrokeStyle(2, 0x6366F1, 0.8).setDepth(12);
+      this.wallsGroup.add(wall);
+    }
+  }
 
   private generateArenaTextures() {
-    // Hero textures — one per hero class
     const heroConfigs = [
       { key: 'hero_blaze',  color: 0xef4444, rim: 0xfacc15, inner: 0xf97316 },
       { key: 'hero_volt',   color: 0xfbbf24, rim: 0xfef08a, inner: 0xf59e0b },
@@ -514,8 +703,6 @@ export class ArenaScene extends Phaser.Scene {
       { key: 'hero_luna',   color: 0xa855f7, rim: 0xe9d5ff, inner: 0x7c3aed },
       { key: 'hero_buster', color: 0x92400e, rim: 0xd97706, inner: 0x78350f },
       { key: 'hero_pico',   color: 0x22c55e, rim: 0xbbf7d0, inner: 0x16a34a },
-      { key: 'hero_ally',   color: 0x3b82f6, rim: 0x00d9ff, inner: 0x1d4ed8 },
-      { key: 'hero_enemy',  color: 0xd946ef, rim: 0xff0055, inner: 0x9d174d },
     ];
 
     heroConfigs.forEach(({ key, color, rim, inner }) => {
@@ -536,79 +723,34 @@ export class ArenaScene extends Phaser.Scene {
       }
     });
 
-    // Bullet
-    if (!this.textures.exists('fire_shot')) {
-      const g = this.add.graphics();
-      g.fillStyle(0xf97316, 1); g.fillCircle(10, 10, 8);
-      g.fillStyle(0xfef08a, 1); g.fillCircle(10, 10, 4);
-      g.generateTexture('fire_shot', 20, 20); g.destroy();
-    }
-
-    // Crystal
     if (!this.textures.exists('gem_crystal')) {
       const g = this.add.graphics();
-      g.fillStyle(0x00d9ff, 1);
+      g.fillStyle(0x00D9FF, 1);
       g.beginPath();
       g.moveTo(14, 0); g.lineTo(28, 12); g.lineTo(14, 28); g.lineTo(0, 12);
       g.closePath(); g.fill();
-      g.lineStyle(2, 0xffffff, 0.9); g.stroke();
-      g.generateTexture('gem_crystal', 28, 28); g.destroy();
+      g.lineStyle(2, 0xFFFFFF, 0.9); g.stroke();
+      g.generateTexture('gem_crystal', 28, 28);
+      g.destroy();
     }
   }
-
-  private renderMapEnvironment() {
-    const g = this.add.graphics();
-    g.fillStyle(0x0a1128, 1);
-    g.fillRect(0, 0, MAP_W, MAP_H);
-    g.lineStyle(1, 0x1e293b, 0.25);
-    for (let x = 0; x < MAP_W; x += 60) g.lineBetween(x, 0, x, MAP_H);
-    for (let y = 0; y < MAP_H; y += 60) g.lineBetween(0, y, MAP_W, y);
-    // Crystal mine center
-    g.fillStyle(0x111827, 0.9); g.fillCircle(MAP_W / 2, MAP_H / 2, 90);
-    g.lineStyle(4, 0x00d9ff, 0.7); g.strokeCircle(MAP_W / 2, MAP_H / 2, 90);
-    g.fillStyle(0x000000, 0.95); g.fillCircle(MAP_W / 2, MAP_H / 2, 40);
-    g.lineStyle(2, 0x38bdf8, 1); g.strokeCircle(MAP_W / 2, MAP_H / 2, 40);
-
-    // Team spawn zones
-    g.fillStyle(0x00d9ff, 0.06); g.fillRect(0, 0, 200, MAP_H);     // blue
-    g.fillStyle(0xef4444, 0.06); g.fillRect(MAP_W - 200, 0, 200, MAP_H); // red
-  }
-
-  private buildMapObstacles() {
-    const bushData = [
-      { x: 380, y: 300, w: 140, h: 100 }, { x: 1020, y: 300, w: 140, h: 100 },
-      { x: 380, y: 700, w: 140, h: 100 }, { x: 1020, y: 700, w: 140, h: 100 },
-      { x: 700, y: 220, w: 180, h: 90  }, { x: 700,  y: 780, w: 180, h: 90  },
-    ];
-    bushData.forEach(b => {
-      const r = this.add.rectangle(b.x, b.y, b.w, b.h, 0x15803d, 0.85);
-      r.setStrokeStyle(2, 0x4ade80, 0.7).setDepth(10);
-      this.physics.add.existing(r, true);
-      this.bushes.add(r);
-    });
-
-    const wallData = [
-      { x: 220,  y: 200, w: 140, h: 36 }, { x: 1180, y: 200, w: 140, h: 36 },
-      { x: 220,  y: 800, w: 140, h: 36 }, { x: 1180, y: 800, w: 140, h: 36 },
-      { x: 520,  y: 440, w: 36, h: 120 }, { x: 880,  y: 440, w: 36, h: 120 },
-      { x: 520,  y: 560, w: 36, h: 120 }, { x: 880,  y: 560, w: 36, h: 120 },
-    ];
-    wallData.forEach(w => {
-      const r = this.add.rectangle(w.x, w.y, w.w, w.h, 0x1e1b4b);
-      r.setStrokeStyle(2, 0x818cf8, 0.8).setDepth(12);
-      this.physics.add.existing(r, true);
-      this.walls.add(r);
-    });
-  }
-
-  // ─── Helpers ───────────────────────────────────────────────────────────────
 
   private showFloatingText(x: number, y: number, text: string, color: string) {
     const label = this.add.text(x, y, text, {
       fontFamily: 'Montserrat, sans-serif',
       fontSize: '14px',
-      color, stroke: '#000000', strokeThickness: 3,
+      color,
+      stroke: '#000000',
+      strokeThickness: 3,
     }).setOrigin(0.5).setDepth(35);
-    this.tweens.add({ targets: label, y: y - 35, alpha: 0, duration: 900, onComplete: () => label.destroy() });
+
+    this.tweens.add({
+      targets: label,
+      y: y - 36,
+      alpha: 0,
+      duration: 850,
+      ease: 'Power1',
+      onComplete: () => label.destroy(),
+    });
   }
 }

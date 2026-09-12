@@ -1,17 +1,13 @@
 /**
- * NetworkManager — Socket.IO client wrapper for the game.
- *
- * Responsibilities:
- * - Connect with JWT auth
- * - Send player:input at 20 TPS (fixed rate)
- * - Receive game:state snapshots and queue them for interpolation
- * - Expose typed event callbacks to ArenaScene
+ * NetworkManager — Socket.IO client wrapper with client prediction and interpolation buffer.
  */
 
 import { io, Socket } from 'socket.io-client';
 
-const SOCKET_URL   = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
-const INPUT_RATE_MS = 50; // 20 TPS send rate
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
+const INPUT_RATE_MS = 50; // 20 TPS client input rate
+
+// ─── Data Types ───────────────────────────────────────────────────────────────
 
 export interface PlayerState {
   id: string;
@@ -23,9 +19,12 @@ export interface PlayerState {
   y: number;
   hp: number;
   maxHp: number;
+  shield?: number;
   ammo: number;
   superCharge: number;
   isDead: boolean;
+  isInBush?: boolean;
+  isDisconnected?: boolean;
   respawnAt: number;
   kills: number;
   deaths: number;
@@ -45,10 +44,19 @@ export interface CrystalState {
   y: number;
 }
 
+export interface AOEZoneState {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  type: string;
+}
+
 export interface GameSnapshot {
   players:    PlayerState[];
   bullets:    BulletState[];
   crystals:   CrystalState[];
+  aoeZones?:  AOEZoneState[];
   blueScore:  number;
   redScore:   number;
   status:     string;
@@ -66,14 +74,34 @@ export interface PendingInput {
   sequenceNumber: number;
 }
 
+export interface SuperEffectData {
+  heroSlug: string;
+  type: string;
+  x?: number;
+  y?: number;
+  startX?: number;
+  startY?: number;
+  endX?: number;
+  endY?: number;
+  radius?: number;
+  value?: number;
+}
+
 export interface NetworkCallbacks {
   onMatchFound:    (data: { roomId: string; blueTeam: object[]; redTeam: object[] }) => void;
   onCountdown:     (data: { seconds: number }) => void;
   onGameStart:     (data: { mapName: string }) => void;
   onGameState:     (snapshot: GameSnapshot) => void;
-  onPlayerDamaged: (data: { targetId: string; damage: number; remainingHp: number }) => void;
+  onPlayerDamaged: (data: { targetId: string; damage: number; remainingHp: number; shield?: number }) => void;
   onPlayerDied:    (data: { victimId: string; victimName?: string; killerId: string; killerName?: string; respawnInMs: number }) => void;
   onPlayerRespawned:(data: { playerId: string; x: number; y: number }) => void;
+  onSuperEffect:   (data: SuperEffectData) => void;
+  onCrystalSpawned:(data: { id: string; x: number; y: number }) => void;
+  onCrystalCollected: (data: { crystalId: string; collectorId: string; team: string; crystalsHeld: number; blueScore: number; redScore: number }) => void;
+  onWinCountdownStart: (data: { team: string; secondsRemaining: number }) => void;
+  onWinCountdownCancelled: () => void;
+  onPlayerDisconnected: (data: { socketId: string; username: string }) => void;
+  onPlayerReconnected:  (data: { socketId: string; username: string }) => void;
   onGameOver:      (data: object) => void;
   onDisconnect:    (reason: string) => void;
   onError:         (err: string) => void;
@@ -89,7 +117,7 @@ export class NetworkManager {
 
   // Snapshot buffer for interpolation
   private snapshotBuffer: GameSnapshot[] = [];
-  readonly MAX_BUFFER = 3;
+  readonly MAX_BUFFER = 4;
 
   connect(token: string): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -140,12 +168,10 @@ export class NetworkManager {
 
   // ─── Input ─────────────────────────────────────────────────────────────────
 
-  /**
-   * Call this from ArenaScene on every frame with the latest input.
-   * NetworkManager sends it at 20 TPS, not every frame.
-   */
-  setInput(input: Omit<PendingInput, 'sequenceNumber'>): void {
-    this.currentInput = { ...input, sequenceNumber: ++this.sequenceNumber };
+  setInput(input: Omit<PendingInput, 'sequenceNumber'>): number {
+    const seq = ++this.sequenceNumber;
+    this.currentInput = { ...input, sequenceNumber: seq };
+    return seq;
   }
 
   private startInputLoop(): void {
@@ -162,16 +188,10 @@ export class NetworkManager {
 
   // ─── Snapshot buffer for interpolation ────────────────────────────────────
 
-  /**
-   * Returns the interpolated game state between the two most recent snapshots.
-   * Call this every render frame for smooth 60 FPS visuals.
-   * @param renderTime - Current render time (typically Date.now() - 100ms for interpolation delay)
-   */
   getInterpolatedState(renderTime: number): GameSnapshot | null {
     const buf = this.snapshotBuffer;
     if (buf.length < 2) return buf[buf.length - 1] || null;
 
-    // Find the two snapshots that bracket renderTime
     let newer = buf[buf.length - 1];
     let older = buf[buf.length - 2];
 
@@ -186,9 +206,8 @@ export class NetworkManager {
     const duration = newer.serverTime - older.serverTime;
     if (duration <= 0) return newer;
 
-    const t = Math.min(1, (renderTime - older.serverTime) / duration);
+    const t = Math.min(1, Math.max(0, (renderTime - older.serverTime) / duration));
 
-    // Interpolate player positions
     const players = newer.players.map((newP) => {
       const oldP = older.players.find(p => p.id === newP.id);
       if (!oldP) return newP;
@@ -230,7 +249,6 @@ export class NetworkManager {
     this.socket.on('game:state', (snapshot: Omit<GameSnapshot, 'receivedAt'>) => {
       const enriched: GameSnapshot = { ...snapshot, receivedAt: Date.now() };
 
-      // Maintain bounded snapshot buffer
       this.snapshotBuffer.push(enriched);
       if (this.snapshotBuffer.length > this.MAX_BUFFER) {
         this.snapshotBuffer.shift();
@@ -251,6 +269,34 @@ export class NetworkManager {
       this.callbacks.onPlayerRespawned?.(data);
     });
 
+    this.socket.on('super:effect', (data) => {
+      this.callbacks.onSuperEffect?.(data);
+    });
+
+    this.socket.on('crystal:spawned', (data) => {
+      this.callbacks.onCrystalSpawned?.(data);
+    });
+
+    this.socket.on('crystal:collected', (data) => {
+      this.callbacks.onCrystalCollected?.(data);
+    });
+
+    this.socket.on('game:win_countdown_start', (data) => {
+      this.callbacks.onWinCountdownStart?.(data);
+    });
+
+    this.socket.on('game:win_countdown_cancelled', () => {
+      this.callbacks.onWinCountdownCancelled?.();
+    });
+
+    this.socket.on('player:disconnected', (data) => {
+      this.callbacks.onPlayerDisconnected?.(data);
+    });
+
+    this.socket.on('player:reconnected', (data) => {
+      this.callbacks.onPlayerReconnected?.(data);
+    });
+
     this.socket.on('game:over', (data) => {
       this.callbacks.onGameOver?.(data);
     });
@@ -266,5 +312,4 @@ export class NetworkManager {
   }
 }
 
-// Singleton instance
 export const networkManager = new NetworkManager();
