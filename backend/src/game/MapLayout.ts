@@ -41,7 +41,7 @@ export const CRYSTAL_MINE = {
 export const BLUE_BASE = { x: 140, y: 500, radius: 100 };
 export const RED_BASE  = { x: 1260, y: 500, radius: 100 };
 
-// Symmetrical Walls (Cover & Chokepoints)
+// 14 Symmetrical Walls/Barriers (4 center diamond, 3 blue-side, 3 red-side, 4 flank corridors)
 export const ARENA_WALLS: RectObstacle[] = [
   // Center Mine defensive covers (diamond flank barriers)
   { id: 'wall_center_top',    x: 650, y: 350, w: 100, h: 30 },

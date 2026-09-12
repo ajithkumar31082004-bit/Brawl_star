@@ -166,18 +166,34 @@ export class NetworkManager {
     this.socket?.emit('matchmaking:cancel');
   }
 
+  private pendingSuperLatch = false;
+
   // ─── Input ─────────────────────────────────────────────────────────────────
+
+  triggerSuper(): void {
+    this.pendingSuperLatch = true;
+    if (this.currentInput) {
+      this.currentInput.usingSuper = true;
+    }
+  }
 
   setInput(input: Omit<PendingInput, 'sequenceNumber'>): number {
     const seq = ++this.sequenceNumber;
-    this.currentInput = { ...input, sequenceNumber: seq };
+    const usingSuper = input.usingSuper || this.pendingSuperLatch;
+    this.currentInput = { ...input, usingSuper, sequenceNumber: seq };
     return seq;
   }
 
   private startInputLoop(): void {
     this.inputInterval = setInterval(() => {
       if (!this.currentInput || !this.socket?.connected) return;
-      this.socket.emit('player:input', this.currentInput);
+      const toSend = { ...this.currentInput };
+      if (this.pendingSuperLatch || this.currentInput.usingSuper) {
+        toSend.usingSuper = true;
+        this.pendingSuperLatch = false;
+        this.currentInput.usingSuper = false;
+      }
+      this.socket.emit('player:input', toSend);
     }, INPUT_RATE_MS);
   }
 
@@ -295,6 +311,26 @@ export class NetworkManager {
 
     this.socket.on('player:reconnected', (data) => {
       this.callbacks.onPlayerReconnected?.(data);
+    });
+
+    this.socket.on('game:reconnect_sync', (data: {
+      snapshot?: Omit<GameSnapshot, 'receivedAt'>;
+      winCountdown?: { team: string; secondsRemaining: number } | null;
+      playerState?: { username?: string; id?: string };
+    }) => {
+      console.log('[Network] Full reconnection sync received:', data);
+      if (data.snapshot) {
+        const enriched: GameSnapshot = { ...data.snapshot, receivedAt: Date.now() };
+        this.snapshotBuffer = [enriched];
+        this.callbacks.onGameState?.(enriched);
+      }
+      if (data.winCountdown) {
+        this.callbacks.onWinCountdownStart?.(data.winCountdown);
+      }
+      this.callbacks.onPlayerReconnected?.({
+        socketId: this.mySocketId || '',
+        username: data.playerState?.username || 'You',
+      });
     });
 
     this.socket.on('game:over', (data) => {

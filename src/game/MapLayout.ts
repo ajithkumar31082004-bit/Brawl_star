@@ -31,6 +31,7 @@ export const CRYSTAL_MINE = {
 export const BLUE_BASE = { x: 140, y: 500, radius: 100 };
 export const RED_BASE  = { x: 1260, y: 500, radius: 100 };
 
+// 14 Symmetrical Walls/Barriers (4 center diamond, 3 blue-side, 3 red-side, 4 flank corridors)
 export const ARENA_WALLS: RectObstacle[] = [
   { id: 'wall_center_top',    x: 650, y: 350, w: 100, h: 30 },
   { id: 'wall_center_bottom', x: 650, y: 620, w: 100, h: 30 },

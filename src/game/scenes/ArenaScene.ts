@@ -8,6 +8,7 @@ import {
   CRYSTAL_MINE,
   resolveWallSliding,
 } from '../MapLayout';
+import { getHeroMovementSpeed } from '../HeroStats';
 
 // ─── Callbacks from PhaserGame (React HUD) ─────────────────────────────────
 
@@ -80,6 +81,11 @@ export class ArenaScene extends Phaser.Scene {
   private aimTarget = { x: 0, y: 0 };
   private isFiring  = false;
 
+  // Hero Authoritative Movement & Abilities
+  private heroSpeed = 290;
+  private spaceKey?: Phaser.Input.Keyboard.Key;
+  private wantsToSuper = false;
+
   // Client-Side Prediction (Local Player)
   private predictX = 200;
   private predictY = 500;
@@ -103,7 +109,12 @@ export class ArenaScene extends Phaser.Scene {
   init(data?: Partial<ArenaInitData>) {
     if (data?.callbacks) this.callbacks = data.callbacks;
     if (data?.roomId)    this.roomId = data.roomId;
-    if (data?.heroSlug)  this.heroSlug = data.heroSlug;
+    if (data?.heroSlug) {
+      this.heroSlug = data.heroSlug;
+      this.heroSpeed = getHeroMovementSpeed(data.heroSlug);
+    } else {
+      this.heroSpeed = getHeroMovementSpeed(this.heroSlug);
+    }
     this.mySocketId = data?.mySocketId || networkManager.myId || '';
   }
 
@@ -121,10 +132,11 @@ export class ArenaScene extends Phaser.Scene {
     this.cameras.main.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
     this.cameras.main.setZoom(1.05);
 
-    // Keyboard inputs
+    // Keyboard inputs (WASD, Arrows, and SPACE for Super)
     if (this.input.keyboard) {
       this.cursors  = this.input.keyboard.createCursorKeys();
       this.wasdKeys = this.input.keyboard.addKeys('W,A,S,D') as Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>;
+      this.spaceKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
     }
 
     // Pointer aiming & firing
@@ -179,6 +191,11 @@ export class ArenaScene extends Phaser.Scene {
   update(_time: number, delta: number) {
     const dt = delta / 1000;
 
+    // SPACE key triggers Super
+    if (this.spaceKey && Phaser.Input.Keyboard.JustDown(this.spaceKey)) {
+      this.activateSuper();
+    }
+
     // Gather movement input
     let dx = 0;
     let dy = 0;
@@ -193,14 +210,18 @@ export class ArenaScene extends Phaser.Scene {
       dy *= 0.7071;
     }
 
-    // Client-side prediction with wall sliding
-    const speed = 290;
+    // Client-side prediction with wall sliding using authoritative hero speed
+    const speed = this.heroSpeed;
     const targetX = Phaser.Math.Clamp(this.predictX + dx * speed * dt, 24, MAP_WIDTH - 24);
     const targetY = Phaser.Math.Clamp(this.predictY + dy * speed * dt, 24, MAP_HEIGHT - 24);
     const resolved = resolveWallSliding(this.predictX, this.predictY, targetX, targetY, 24);
 
     this.predictX = resolved.x;
     this.predictY = resolved.y;
+
+    // Check if Super was requested this frame or queued
+    const sendSuper = this.wantsToSuper;
+    this.wantsToSuper = false;
 
     // Send input to server and record sequence
     const seq = networkManager.setInput({
@@ -209,7 +230,7 @@ export class ArenaScene extends Phaser.Scene {
       aimX:       this.aimTarget.x,
       aimY:       this.aimTarget.y,
       firing:     this.isFiring,
-      usingSuper: false,
+      usingSuper: sendSuper,
     });
 
     this.inputHistory.push({ seq, dx, dy, dt });
@@ -238,15 +259,21 @@ export class ArenaScene extends Phaser.Scene {
     // 1. Reconcile Local Player
     const me = snapshot.players.find(p => p.id === this.mySocketId);
     if (me) {
+      // Synchronize heroSpeed if server hero differs
+      if (me.heroSlug && me.heroSlug !== this.heroSlug) {
+        this.heroSlug = me.heroSlug;
+        this.heroSpeed = getHeroMovementSpeed(me.heroSlug);
+      }
+
       const errDist = Phaser.Math.Distance.Between(this.predictX, this.predictY, me.x, me.y);
       if (errDist > 40) {
-        // Correct position and replay pending inputs newer than me.lastSeq
+        // Correct position and replay pending inputs newer than me.lastSeq using authoritative hero speed
         this.predictX = me.x;
         this.predictY = me.y;
         this.inputHistory = this.inputHistory.filter(item => item.seq > me.lastSeq);
         for (const input of this.inputHistory) {
-          const tX = Phaser.Math.Clamp(this.predictX + input.dx * 290 * input.dt, 24, MAP_WIDTH - 24);
-          const tY = Phaser.Math.Clamp(this.predictY + input.dy * 290 * input.dt, 24, MAP_HEIGHT - 24);
+          const tX = Phaser.Math.Clamp(this.predictX + input.dx * this.heroSpeed * input.dt, 24, MAP_WIDTH - 24);
+          const tY = Phaser.Math.Clamp(this.predictY + input.dy * this.heroSpeed * input.dt, 24, MAP_HEIGHT - 24);
           const res = resolveWallSliding(this.predictX, this.predictY, tX, tY, 24);
           this.predictX = res.x;
           this.predictY = res.y;
@@ -482,9 +509,22 @@ export class ArenaScene extends Phaser.Scene {
     const ps = this.playerSprites.get(targetId);
     if (!ps) return;
 
-    // Floating damage numbers
-    const color = shield && shield > 0 ? '#38BDF8' : '#EF4444';
-    this.showFloatingText(ps.body.x, ps.body.y - 28, `-${damage}`, color);
+    // Floating damage numbers with shield distinction
+    const isShieldHit = typeof shield === 'number' && shield > 0;
+    const color = isShieldHit ? '#38BDF8' : '#EF4444';
+    const text = isShieldHit ? `🛡️ -${damage}` : `-${damage}`;
+    this.showFloatingText(ps.body.x, ps.body.y - 28, text, color);
+
+    // Hit impact sparks (expanding radiant flash)
+    const spark = this.add.circle(ps.body.x, ps.body.y, 14, 0xFFFFFF, 0.85).setDepth(28);
+    this.tweens.add({
+      targets: spark,
+      scale: { from: 1, to: 2.2 },
+      alpha: 0,
+      duration: 160,
+      ease: 'Cubic.easeOut',
+      onComplete: () => spark.destroy(),
+    });
 
     // Hit impact flash
     ps.body.setTint(0xFFFFFF);
@@ -569,12 +609,12 @@ export class ArenaScene extends Phaser.Scene {
   // ─── Public API (PhaserGame Buttons) ───────────────────────────────────────
 
   public activateSuper() {
-    networkManager.setInput({
-      dx: 0, dy: 0,
-      aimX: this.aimTarget.x, aimY: this.aimTarget.y,
-      firing: false,
-      usingSuper: true,
-    });
+    this.wantsToSuper = true;
+    networkManager.triggerSuper();
+    const ps = this.playerSprites.get(this.mySocketId);
+    if (ps) {
+      this.showFloatingText(ps.body.x, ps.body.y - 28, '🔥 SUPER CAST!', '#FACC15');
+    }
     this.cameras.main.shake(250, 0.015);
   }
 

@@ -272,7 +272,7 @@ export class GameRoom extends EventEmitter {
 
         console.log(`[GameRoom] ✅ ${player.username} reconnected with new socket ${newSocketId}!`);
 
-        // Send full sync state
+        // Send full sync state with authoritative snapshot and countdown
         this.io.to(newSocketId).emit('game:reconnect_sync', {
           roomId: this.id,
           gameMode: this.gameMode,
@@ -282,6 +282,11 @@ export class GameRoom extends EventEmitter {
           redScore: this.redScore,
           crystalsHeld: player.crystalsHeld,
           playerState: this.serializePlayer(player),
+          snapshot: this.buildFullSnapshot(),
+          winCountdown: this.gemHolderTeam ? {
+            team: this.gemHolderTeam,
+            secondsRemaining: Math.max(0, Math.ceil((this.gemCountdownEnd - Date.now()) / 1000)),
+          } : null,
         });
 
         this.io.to(this.id).emit('player:reconnected', {
@@ -362,13 +367,50 @@ export class GameRoom extends EventEmitter {
     }
   }
 
-  // ─── Input receiving ───────────────────────────────────────────────────────
+  // ─── Input receiving & Anti-Cheat Validation ───────────────────────────────
 
   receiveInput(socketId: string, input: PlayerInput): void {
     const player = this.players.get(socketId);
     if (!player || player.isDead) return;
 
-    player.pendingInput = input;
+    // 1. Validate payload object
+    if (!input || typeof input !== 'object') return;
+
+    // 2. Strict sequence validation
+    const seq = Number(input.sequenceNumber);
+    if (!Number.isFinite(seq) || seq <= player.lastProcessedSequence) return;
+
+    // 3. Movement vector validation and clamping
+    let dx = Number(input.dx);
+    let dy = Number(input.dy);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    dx = Math.max(-1.0, Math.min(1.0, dx));
+    dy = Math.max(-1.0, Math.min(1.0, dy));
+
+    // 4. Aim vector validation and arena bound constraints
+    let aimX = Number(input.aimX);
+    let aimY = Number(input.aimY);
+    if (!Number.isFinite(aimX) || !Number.isFinite(aimY)) {
+      aimX = player.x;
+      aimY = player.y;
+    } else {
+      aimX = Math.max(-200, Math.min(MAP_WIDTH + 200, aimX));
+      aimY = Math.max(-200, Math.min(MAP_HEIGHT + 200, aimY));
+    }
+
+    // 5. Sanitize booleans
+    const firing = Boolean(input.firing);
+    const usingSuper = Boolean(input.usingSuper);
+
+    player.pendingInput = {
+      sequenceNumber: seq,
+      dx,
+      dy,
+      aimX,
+      aimY,
+      firing,
+      usingSuper,
+    };
   }
 
   // ─── Match Lifecycle ───────────────────────────────────────────────────────
@@ -485,39 +527,83 @@ export class GameRoom extends EventEmitter {
     }
   }
 
-  // ─── Bot AI ────────────────────────────────────────────────────────────────
+  // ─── Tactical Bot AI ───────────────────────────────────────────────────────
 
   private updateBotAI(_dt: number, now: number): void {
     for (const player of this.players.values()) {
       if (!player.isBot || player.isDead) continue;
 
       const enemies = [...this.players.values()].filter(p => p.team !== player.team && !p.isDead);
+      const allies = [...this.players.values()].filter(p => p.team === player.team && p.socketId !== player.socketId && !p.isDead);
       const crystals = this.crystals.filter(c => c.alive);
 
       let targetX = CRYSTAL_MINE.x;
       let targetY = CRYSTAL_MINE.y;
       let shouldFire = false;
-      let useSuper = player.superCharge >= 100;
-      let aimX = targetX;
-      let aimY = targetY;
+      let useSuper = false;
 
+      // 1. Scan enemies for distance, threat, and high-value crystal carrier
       let closestEnemy: ServerPlayer | null = null;
       let closestDist = Infinity;
+      let enemyCarrier: ServerPlayer | null = null;
+      let maxEnemyCrystals = 0;
+      let lowHpEnemy: ServerPlayer | null = null;
+
       for (const e of enemies) {
         const d = distance(player.x, player.y, e.x, e.y);
         if (d < closestDist) {
           closestDist = d;
           closestEnemy = e;
         }
+        if (e.crystalsHeld >= 3 && e.crystalsHeld > maxEnemyCrystals) {
+          maxEnemyCrystals = e.crystalsHeld;
+          enemyCarrier = e;
+        }
+        if (e.hp <= e.maxHp * 0.35 && (!lowHpEnemy || d < distance(player.x, player.y, lowHpEnemy.x, lowHpEnemy.y))) {
+          lowHpEnemy = e;
+        }
       }
 
-      if (closestEnemy && closestDist <= player.heroConfig.attackRange + 120) {
-        aimX = closestEnemy.x + (Math.random() * 20 - 10);
-        aimY = closestEnemy.y + (Math.random() * 20 - 10);
-        shouldFire = true;
+      // 2. Scan allies for friendly carrier to protect
+      let friendlyCarrier: ServerPlayer | null = null;
+      for (const a of allies) {
+        if (a.crystalsHeld >= 5 && (!friendlyCarrier || a.crystalsHeld > friendlyCarrier.crystalsHeld)) {
+          friendlyCarrier = a;
+        }
       }
 
-      if (crystals.length > 0 && player.crystalsHeld < 6) {
+      // Aim target defaults to closest or high-priority enemy
+      const combatTarget = enemyCarrier || lowHpEnemy || closestEnemy;
+      let aimX = combatTarget ? combatTarget.x : CRYSTAL_MINE.x;
+      let aimY = combatTarget ? combatTarget.y : CRYSTAL_MINE.y;
+
+      if (combatTarget && closestDist <= player.heroConfig.attackRange + 140) {
+        aimX = combatTarget.x + (Math.random() * 16 - 8);
+        aimY = combatTarget.y + (Math.random() * 16 - 8);
+        shouldFire = closestDist <= player.heroConfig.attackRange + 60 && player.ammo > 0;
+      }
+
+      // 3. Tactical Positioning & Objective Decision Tree
+      const isLowHp = player.hp < player.maxHp * 0.32;
+      const isTeamInLead = (player.team === 'blue' ? this.blueScore : this.redScore) >= 10;
+      const isEnemyInLead = (player.team === 'blue' ? this.redScore : this.blueScore) >= 8;
+
+      if (isLowHp) {
+        // Priority 1: Self-preservation — retreat toward team base
+        const base = player.team === 'blue' ? BLUE_BASE : RED_BASE;
+        targetX = base.x;
+        targetY = base.y;
+      } else if (isEnemyInLead && enemyCarrier) {
+        // Priority 2: Stop enemy countdown — hunt enemy gem carrier!
+        targetX = enemyCarrier.x;
+        targetY = enemyCarrier.y;
+      } else if (friendlyCarrier && player.crystalsHeld < 3 && isTeamInLead) {
+        // Priority 3: Escort & bodyguard friendly carrier during countdown
+        const shieldOffset = player.team === 'blue' ? 70 : -70;
+        targetX = friendlyCarrier.x + shieldOffset;
+        targetY = friendlyCarrier.y;
+      } else if (crystals.length > 0 && player.crystalsHeld < 7) {
+        // Priority 4: Collect nearest available ground crystal
         let nearest = crystals[0];
         let minDist = distance(player.x, player.y, crystals[0].x, crystals[0].y);
         for (const c of crystals) {
@@ -529,26 +615,57 @@ export class GameRoom extends EventEmitter {
         }
         targetX = nearest.x;
         targetY = nearest.y;
+      } else if (lowHpEnemy && distance(player.x, player.y, lowHpEnemy.x, lowHpEnemy.y) <= player.heroConfig.attackRange + 120) {
+        // Priority 5: Chase low-HP enemy
+        targetX = lowHpEnemy.x;
+        targetY = lowHpEnemy.y;
       } else if (closestEnemy) {
-        if (player.hp < player.maxHp * 0.3) {
-          // Low HP: retreat toward own spawn base
-          const base = player.team === 'blue' ? BLUE_BASE : RED_BASE;
-          targetX = base.x;
-          targetY = base.y;
+        // Priority 6: Tactical skirmishing at optimal attack range
+        const optimalDist = player.heroConfig.attackRange * 0.75;
+        if (closestDist > optimalDist) {
+          targetX = closestEnemy.x;
+          targetY = closestEnemy.y;
         } else {
-          // Combat positioning: keep optimal range
-          const optimalDist = player.heroConfig.attackRange * 0.7;
-          if (closestDist > optimalDist) {
-            targetX = closestEnemy.x;
-            targetY = closestEnemy.y;
-          } else {
-            const angle = Math.atan2(player.y - closestEnemy.y, player.x - closestEnemy.x) + 0.5;
-            targetX = closestEnemy.x + Math.cos(angle) * optimalDist;
-            targetY = closestEnemy.y + Math.sin(angle) * optimalDist;
+          const angle = Math.atan2(player.y - closestEnemy.y, player.x - closestEnemy.x);
+          targetX = closestEnemy.x + Math.cos(angle) * optimalDist;
+          targetY = closestEnemy.y + Math.sin(angle) * optimalDist;
+        }
+      } else {
+        // Priority 7: Contest central crystal mine
+        targetX = CRYSTAL_MINE.x + (player.team === 'blue' ? -40 : 40);
+        targetY = CRYSTAL_MINE.y;
+      }
+
+      // 4. Tactical Super Ability Evaluation
+      if (player.superCharge >= 100 && combatTarget) {
+        const targetDist = distance(player.x, player.y, combatTarget.x, combatTarget.y);
+        const superType = player.heroConfig.superType;
+
+        if (superType === 'fire_storm' || superType === 'hammer_quake' || superType === 'ice_burst') {
+          if (targetDist <= player.heroConfig.attackRange + 60) {
+            useSuper = true;
+            aimX = combatTarget.x;
+            aimY = combatTarget.y;
+          }
+        } else if (superType === 'lightning_dash') {
+          if (targetDist >= 80 && targetDist <= 320) {
+            useSuper = true;
+            aimX = combatTarget.x;
+            aimY = combatTarget.y;
+          }
+        } else if (superType === 'star_beam') {
+          const anyAllyLow = allies.some(a => a.hp < a.maxHp * 0.6 && distance(player.x, player.y, a.x, a.y) < 240);
+          if (player.hp < player.maxHp * 0.65 || anyAllyLow) {
+            useSuper = true;
+          }
+        } else if (superType === 'shield_wall') {
+          if (player.hp < player.maxHp * 0.75 || targetDist <= 280) {
+            useSuper = true;
           }
         }
       }
 
+      // 5. Direction calculation
       const moveDx = targetX - player.x;
       const moveDy = targetY - player.y;
       const moveLen = Math.sqrt(moveDx * moveDx + moveDy * moveDy) || 1;
@@ -1088,8 +1205,8 @@ export class GameRoom extends EventEmitter {
 
   // ─── State Broadcast ───────────────────────────────────────────────────────
 
-  private broadcastState(now: number): void {
-    const payload = {
+  public buildFullSnapshot(now = Date.now()) {
+    return {
       serverTime: now,
       status:     this.status,
       blueScore:  this.blueScore,
@@ -1099,7 +1216,10 @@ export class GameRoom extends EventEmitter {
       crystals:   this.crystals.map(c => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y) })),
       aoeZones:   this.aoeZones.map(z => ({ id: z.id, x: Math.round(z.x), y: Math.round(z.y), radius: z.radius, type: z.type })),
     };
+  }
 
+  private broadcastState(now: number): void {
+    const payload = this.buildFullSnapshot(now);
     this.io.to(this.id).emit('game:state', payload);
   }
 
